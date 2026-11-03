@@ -1,5 +1,3 @@
-cd ~/VoiceChatMod
-cat > .github/workflows/build.yml << 'EOF'
 name: Build
 
 on:
@@ -44,4 +42,3 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: build-*/*.levipack
-EOF
