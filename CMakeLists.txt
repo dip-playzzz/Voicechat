@@ -129,6 +129,7 @@ add_library(${MOD_LIBRARY_NAME} SHARED
     src/mod/VoiceMod.cpp
     src/voice/Loopback.cpp
     src/voice/PlayerTracker.cpp
+    src/voice/AndroidPermission.cpp
 )
 
 set_target_properties(${MOD_LIBRARY_NAME} PROPERTIES

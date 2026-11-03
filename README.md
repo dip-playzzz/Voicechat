@@ -40,3 +40,12 @@ Expected log line every 5 s once in a world:
 
 `tracker_lifetime_test` publishes player ticks on one thread while another repeatedly attaches,
 stops and destroys the tracker. The previous implementation fails it with a heap-use-after-free.
+
+## Microphone permission
+The mod runs inside the LeviLauncher app, so the microphone permission belongs to LeviLauncher
+(`org.levimc.launcher`), not Minecraft. On startup the mod logs
+`Microphone: app=... declared=... granted=...`:
+- `granted=true`   -> audio starts.
+- `declared=false` -> LeviLauncher's manifest has no RECORD_AUDIO, so Android can't grant it.
+- `granted=false`  -> the mod asks Android to show the prompt (config `requestMicPermission`);
+                      you can also allow it in Settings > Apps > LeviLauncher > Permissions.
