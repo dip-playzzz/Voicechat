@@ -1,3 +1,5 @@
+cd ~/VoiceChatMod
+cat > .github/workflows/build.yml << 'EOF'
 name: Build
 
 on:
@@ -17,12 +19,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Install Android build tools
         run: |
-          sdkmanager "platforms;android-28" "ndk;28.2.13676358"
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then SDKMANAGER="$(command -v sdkmanager)"; fi
+          echo "Using $SDKMANAGER (ANDROID_HOME=$ANDROID_HOME)"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" "platforms;android-28" "ndk;28.2.13676358"
           sudo apt-get update
           sudo apt-get install -y ninja-build
 
@@ -41,3 +44,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: build-*/*.levipack
+EOF
