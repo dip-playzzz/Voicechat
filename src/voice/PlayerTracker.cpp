@@ -5,7 +5,10 @@
 #include <bedrocktools/sdk/world/Actor.hpp>
 #include <bedrocktools/sdk/world/BlockSource.hpp>
 
+#include <dlfcn.h>
+
 #include <chrono>
+#include <fstream>
 
 namespace voicechat {
 
@@ -69,6 +72,67 @@ void onTick(bt::events::EventType type, void *payload, void *user) {
     s->snap = next;
 }
 
+// --- Finding BedrockTools -------------------------------------------------------------
+// BedrockTools' own api::find() only tries dlopen("libBedrockTools.so", RTLD_NOLOAD). On
+// Android that can fail even when the library is loaded (e.g. it was loaded by full path or
+// in another linker namespace), so we also try the path from /proc/self/maps and a global
+// symbol lookup, and keep a human-readable reason for the log.
+const bt::api::ApiV1 *getFrom(void *handle, std::string &why) {
+    auto getter = reinterpret_cast<bt::api::GetApiFunction>(dlsym(handle, "BedrockTools_GetApi"));
+    if (!getter) { why += "no BedrockTools_GetApi symbol; "; return nullptr; }
+    const bt::api::ApiV1 *r = getter(bt::api::AbiVersion);
+    if (!bt::api::compatible(r)) { why += "API version mismatch; "; return nullptr; }
+    return r;
+}
+
+std::string mappedPath(const char *needle) {
+    std::ifstream f("/proc/self/maps");
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.find(needle) == std::string::npos) continue;
+        const auto slash = line.find('/'); // address/perms/offset/dev/inode contain no '/'
+        if (slash != std::string::npos) return line.substr(slash);
+    }
+    return {};
+}
+
+const bt::api::ApiV1 *findRuntime(std::string *diag) {
+    std::string why;
+    if (void *h = dlopen("libBedrockTools.so", RTLD_NOW | RTLD_NOLOAD)) {
+        const auto *r = getFrom(h, why);
+        dlclose(h);
+        if (r) return r;
+    } else {
+        const char *e = dlerror();
+        why += std::string("dlopen(name) failed: ") + (e ? e : "?") + "; ";
+    }
+
+    const std::string path = mappedPath("libBedrockTools.so");
+    if (path.empty()) {
+        why += "libBedrockTools.so not in /proc/self/maps (not loaded in this process); ";
+    } else {
+        why += "mapped at " + path + "; ";
+        if (void *h = dlopen(path.c_str(), RTLD_NOW | RTLD_NOLOAD)) {
+            const auto *r = getFrom(h, why);
+            dlclose(h);
+            if (r) return r;
+        } else {
+            const char *e = dlerror();
+            why += std::string("dlopen(path) failed: ") + (e ? e : "?") + "; ";
+        }
+    }
+
+    if (void *sym = dlsym(RTLD_DEFAULT, "BedrockTools_GetApi")) {
+        const auto *r = reinterpret_cast<bt::api::GetApiFunction>(sym)(bt::api::AbiVersion);
+        if (bt::api::compatible(r)) return r;
+        why += "global symbol found but API mismatch; ";
+    } else {
+        why += "no global BedrockTools_GetApi; ";
+    }
+    if (diag) *diag = why;
+    return nullptr;
+}
+
 } // namespace
 
 PlayerTracker::PlayerTracker(LogFn log, bool periodicLog, const bt::api::ApiV1 *runtime)
@@ -76,10 +140,9 @@ PlayerTracker::PlayerTracker(LogFn log, bool periodicLog, const bt::api::ApiV1 *
 
 PlayerTracker::~PlayerTracker() { stop(); }
 
-bool PlayerTracker::tryAttach() {
-    // find() looks up libBedrockTools.so with RTLD_NOLOAD, so it returns null
-    // until BedrockTools has been loaded into the process.
-    const bt::api::ApiV1 *rt = testRuntime_ ? testRuntime_ : bt::api::find();
+bool PlayerTracker::tryAttach(std::string &diag) {
+    // Returns null until BedrockTools has been loaded into the process.
+    const bt::api::ApiV1 *rt = testRuntime_ ? testRuntime_ : findRuntime(&diag);
     if (!bt::api::compatible(rt) || !rt->subscribe || !rt->unsubscribe) return false;
 
     {
@@ -120,7 +183,7 @@ void PlayerTracker::stop() {
     if (sub_ != 0) {
         // Only call into BedrockTools if it's still the same loaded instance
         // (it may already have been unloaded during shutdown).
-        const bt::api::ApiV1 *live = testRuntime_ ? testRuntime_ : bt::api::find();
+        const bt::api::ApiV1 *live = testRuntime_ ? testRuntime_ : findRuntime(nullptr);
         if (live == rt_ && live->unsubscribe) live->unsubscribe(sub_);
         sub_ = 0;
         rt_ = nullptr;
@@ -134,18 +197,23 @@ void PlayerTracker::stop() {
 
 void PlayerTracker::run() {
     using namespace std::chrono;
-    bool warned = false;
+    int attempts = 0, logged = 0;
     auto lastLog = steady_clock::now();
     std::unique_lock<std::mutex> lk(cvMu_);
     while (!stop_) {
         lk.unlock();
         if (!attached_) {
-            if (tryAttach()) {
+            std::string diag;
+            if (tryAttach(diag)) {
                 attached_ = true;
                 if (log_) log_("Attached to BedrockTools player events");
-            } else if (!warned && log_) {
-                warned = true;
-                log_("BedrockTools not loaded yet - make sure the BedrockTools mod is imported and enabled; retrying");
+            } else {
+                attempts++;
+                // Log the reason on the first attempt and then every ~10 s (max 6 times).
+                if (log_ && logged < 6 && (attempts == 1 || attempts % 20 == 0)) {
+                    logged++;
+                    log_("BedrockTools not found (attempt " + std::to_string(attempts) + "): " + diag + "retrying");
+                }
             }
         } else if (periodicLog_ && steady_clock::now() - lastLog >= seconds(5)) {
             lastLog = steady_clock::now();

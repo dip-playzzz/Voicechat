@@ -61,7 +61,7 @@ bool VoiceMod::enable() {
         if (!mLoopback->start()) {
             // Don't fail the mod (and risk blocking the game) just because audio didn't open.
             // Most likely cause: Minecraft doesn't hold the microphone permission yet.
-            self.getLogger().error("Loopback failed to start (check microphone permission)");
+            self.getLogger().error("Loopback failed to start - grant the Microphone permission to the LeviLauncher app (Android Settings > Apps)");
             mLoopback.reset();
         } else {
             self.getLogger().info("Loopback running - speak, you should hear yourself");

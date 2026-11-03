@@ -45,7 +45,7 @@ class PlayerTracker {
     bool attached() const { return attached_.load(); }
 
   private:
-    bool tryAttach();
+    bool tryAttach(std::string &diag);
     void run();
 
     LogFn log_;

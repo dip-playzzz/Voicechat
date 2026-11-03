@@ -17,6 +17,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # The GitHub runner image already ships the Android SDK, so we skip
+      # android-actions/setup-android (it broke on the new cmdline-tools).
       - name: Install Android build tools
         run: |
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
