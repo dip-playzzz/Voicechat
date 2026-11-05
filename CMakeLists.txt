@@ -12,7 +12,7 @@ set(MOD_NAME "Proximity Voice Chat" CACHE STRING "LeviLauncher mod display name"
 set(MOD_AUTHOR "voicechat" CACHE STRING "LeviLauncher mod author")
 set(MOD_VERSION "0.1.0" CACHE STRING "LeviLauncher mod version")
 set(MOD_LIBRARY_NAME "voicechat" CACHE STRING "Native library name without lib prefix or .so suffix")
-set(MOD_MINECRAFT_VERSIONS "[\"1.26.*\"]" CACHE STRING "Raw JSON array for manifest minecraft_versions")
+set(MOD_MINECRAFT_VERSIONS "[\"1.26.60*\"]" CACHE STRING "Raw JSON array for manifest minecraft_versions")
 set(MOD_ICON "" CACHE STRING "Optional package-relative icon path, such as icon.png")
 
 include(FetchContent)
@@ -130,6 +130,8 @@ add_library(${MOD_LIBRARY_NAME} SHARED
     src/voice/Loopback.cpp
     src/voice/PlayerTracker.cpp
     src/voice/AndroidPermission.cpp
+    src/voice/MicSocketSource.cpp
+    src/voice/SocketLoopback.cpp
 )
 
 set_target_properties(${MOD_LIBRARY_NAME} PROPERTIES

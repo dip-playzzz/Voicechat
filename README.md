@@ -49,3 +49,22 @@ The mod runs inside the LeviLauncher app, so the microphone permission belongs t
 - `declared=false` -> LeviLauncher's manifest has no RECORD_AUDIO, so Android can't grant it.
 - `granted=false`  -> the mod asks Android to show the prompt (config `requestMicPermission`);
                       you can also allow it in Settings > Apps > LeviLauncher > Permissions.
+
+## Launcher microphone service (`micSource = "launcher"`, default)
+Newer LeviLauncher builds with voice support capture the microphone themselves
+(`org.levimc.launcher.voice.VoiceCaptureService`) and stream it to the mod:
+- The mod listens on the abstract unix socket `@org.levimc.voicechatlevi.audio`; the service connects.
+- Data: raw PCM, 16-bit signed, mono, 16 kHz, no header (640-byte / 20 ms writes).
+- The mod never writes to the socket (a reply starting with "VCLS" would make the service stand down).
+- Only connections from our own app UID are accepted.
+Expected log lines: `listening for the launcher microphone stream`, `launcher connected`, then every 5 s
+`mic stream: 250 frames in 5 s, peak -23 dBFS`.
+Host test: `g++ -std=c++20 -g -O1 -fsanitize=address,undefined -Isrc tests/mic_socket_test.cpp src/voice/MicSocketSource.cpp -pthread -o ms && ./ms`
+
+## Crash fix (Minecraft 1.26.52)
+A crash dump from a 1.26.52 device showed a SIGSEGV inside the position-reading code: the vendored
+BedrockTools SDK reads Player memory at offsets made for 1.26.60.*, and on another build the loaded
+pointer was garbage. Now (1) position tracking only starts on 1.26.60.* (version taken from the mod's
+folder name; override with `allowUnsupportedVersion`), and (2) every game-memory read goes through
+`safeRead()` (kernel-checked copy) and a plausibility filter, so a bad offset skips the sample instead of
+crashing. Tests: `tests/safety_test.cpp`.

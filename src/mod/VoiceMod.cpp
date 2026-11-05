@@ -4,6 +4,7 @@
 #include <filesystem>
 
 #include "voice/AndroidPermission.h"
+#include "voice/GameVersion.h"
 
 #include <pl/Mod.hpp>
 
@@ -54,12 +55,33 @@ bool VoiceMod::enable() {
         return true;
     }
 
-    // Position tracking (needs the BedrockTools mod enabled alongside this one).
-    mTracker = std::make_unique<PlayerTracker>(
-        [this](const std::string &msg) { getSelf().getLogger().info("{}", msg); }, mConfig.logPosition);
-    mTracker->start();
+    // Position tracking reads game memory at fixed offsets that only match Minecraft 1.26.60.*.
+    // On any other build that can crash the game, so refuse to start it there.
+    const GameVersion version = parseGameVersion(self.getModDir().string());
+    if (isSupportedGameVersion(version) || mConfig.allowUnsupportedVersion) {
+        self.getLogger().info("Minecraft {} - position tracking enabled", version.valid ? version.text : "(unknown)");
+        mTracker = std::make_unique<PlayerTracker>(
+            [this](const std::string &msg) { getSelf().getLogger().info("{}", msg); }, mConfig.logPosition);
+        mTracker->start();
+    } else {
+        self.getLogger().error(
+            "Minecraft {} is not supported (position offsets are for 1.26.60.*). Position tracking is OFF "
+            "to avoid crashing the game. Use Minecraft 1.26.60.* with the matching BedrockTools.",
+            version.valid ? version.text : "(unknown)");
+    }
 
-    if (mConfig.loopbackTest) {
+    if (mConfig.loopbackTest && mConfig.micSource == "launcher") {
+        // The launcher's VoiceCaptureService owns the microphone and permission prompt;
+        // we only listen for its audio stream.
+        mSocketLoop = std::make_unique<SocketLoopback>(
+            [this](const std::string &msg) { getSelf().getLogger().info("{}", msg); });
+        if (!mSocketLoop->start()) {
+            self.getLogger().error("Could not start the launcher-mic receiver (see lines above)");
+            mSocketLoop.reset();
+        } else {
+            self.getLogger().info("Waiting for LeviLauncher's voice service (needs a launcher build with voice support)");
+        }
+    } else if (mConfig.loopbackTest) {
         {
             std::lock_guard<std::mutex> lock(mAudioMu);
             mAudioStop = false;
@@ -124,6 +146,10 @@ bool VoiceMod::disable() {
     if (mTracker) {
         mTracker->stop();
         mTracker.reset();
+    }
+    if (mSocketLoop) {
+        mSocketLoop->stop();
+        mSocketLoop.reset();
     }
     if (mLoopback) {
         mLoopback->stop();

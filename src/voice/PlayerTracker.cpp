@@ -4,6 +4,9 @@
 #include <bedrocktools/events/LocalPlayerTickEvent.hpp>
 #include <bedrocktools/sdk/world/Actor.hpp>
 #include <bedrocktools/sdk/world/BlockSource.hpp>
+#include <bedrocktools/sdk/Offsets.hpp>
+
+#include "voice/SafeMem.h"
 
 #include <dlfcn.h>
 
@@ -41,17 +44,36 @@ bool readPlayer(bt::sdk::Player *p, PlayerSnapshot &out) {
     return true;
 }
 #else
+// Every read goes through safeRead(), so an offset that doesn't match this Minecraft build
+// makes us skip the sample instead of crashing the game.
 bool readPlayer(bt::sdk::Player *p, PlayerSnapshot &out) {
     if (!p) return false;
-    const auto pos = p->position();
-    const auto rot = p->rotation(); // x = pitch, y = yaw (same use as BedrockTools' Compass)
+    namespace off = bt::sdk::offsets;
+    const auto base = reinterpret_cast<std::uintptr_t>(p);
+
+    std::uintptr_t stateComp = 0, rotComp = 0;
+    float pos[3], rot[2];
+    if (!safeReadPtr(base + off::Actor::mStateVectorComponent, stateComp) || !stateComp) return false;
+    if (!safeRead(reinterpret_cast<const void *>(stateComp), pos, sizeof(pos))) return false;
+    if (!safeReadPtr(base + off::Actor::mActorRotationComponent, rotComp) || !rotComp) return false;
+    if (!safeRead(reinterpret_cast<const void *>(rotComp), rot, sizeof(rot))) return false;
+    if (!plausiblePlayerSample(pos, rot)) return false;
+
+    // Dimension: Actor::mDimension -> Dimension::mBlockSource -> virtual getDimensionId().
     int dim = 0;
-    if (auto *dimension = p->dimension()) {
-        if (auto *region = dimension->blockSource()) dim = region->dimensionId();
+    std::uintptr_t dimension = 0, blockSource = 0, vtable = 0, fn = 0, probe = 0;
+    if (safeReadPtr(base + off::Actor::mDimension, dimension) && dimension &&
+        safeReadPtr(dimension + off::Dimension::mBlockSource, blockSource) && blockSource &&
+        safeReadPtr(blockSource, vtable) && vtable &&
+        safeReadPtr(vtable + sizeof(void *) * off::VTable::BlockSource_getDimensionId, fn) && fn &&
+        safeReadPtr(fn, probe)) { // the function address must at least be readable memory
+        const int id = reinterpret_cast<int (*)(void *)>(fn)(reinterpret_cast<void *>(blockSource));
+        if (id >= 0 && id <= 2) dim = id;
     }
+
     out.valid = true;
-    out.x = pos.x; out.y = pos.y; out.z = pos.z;
-    out.pitch = rot.x; out.yaw = rot.y;
+    out.x = pos[0]; out.y = pos[1]; out.z = pos[2];
+    out.pitch = rot[0]; out.yaw = rot[1];
     out.dimension = dim;
     return true;
 }

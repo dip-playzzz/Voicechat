@@ -9,6 +9,7 @@
 #include "mod/Config.h"
 #include "voice/Loopback.h"
 #include "voice/PlayerTracker.h"
+#include "voice/SocketLoopback.h"
 
 #include <pl/Mod.hpp>
 
@@ -34,6 +35,7 @@ class VoiceMod {
     ModConfig mConfig;
     std::optional<pl::config::ConfigFile<ModConfig>> mConfigFile;
     std::unique_ptr<Loopback> mLoopback;
+    std::unique_ptr<SocketLoopback> mSocketLoop;
     std::unique_ptr<PlayerTracker> mTracker;
     std::thread mAudioThread;
     std::mutex mAudioMu;

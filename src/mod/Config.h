@@ -17,8 +17,15 @@ struct ModConfig {
     int radius = 32; // blocks
     // Log the local player's position every 5 s (proves the BedrockTools hook works).
     bool logPosition = true;
+    // Where microphone audio comes from:
+    //  "launcher" = the LeviLauncher VoiceCaptureService streams it to us (needs a launcher build with voice support)
+    //  "direct"   = this mod opens the mic itself (needs the launcher to declare RECORD_AUDIO)
+    std::string micSource = "launcher";
     // Ask Android to show the microphone prompt if the permission isn't granted yet.
     bool requestMicPermission = true;
+    // Developer switch: read player memory even on a Minecraft build the offsets weren't made for.
+    // Leave OFF; a mismatch can still crash the game.
+    bool allowUnsupportedVersion = false;
 };
 
 nlohmann::json makeDefaultConfigJson();
@@ -44,6 +51,13 @@ template <> struct pl::config::Schema<voicechat::ModConfig> {
             return {.title = "Server port", .description = "Voice relay server UDP port."};
         if (name == "radius")
             return {.title = "Radius", .description = "How far voices carry, in blocks."};
+        if (name == "micSource")
+            return {.title = "Microphone source",
+                    .description = "\"launcher\" = audio streamed by LeviLauncher's voice service (default), "
+                                   "\"direct\" = this mod opens the microphone itself."};
+        if (name == "allowUnsupportedVersion")
+            return {.title = "Allow unsupported Minecraft version",
+                    .description = "Developer only. Position tracking is made for 1.26.60.*; turning this on elsewhere can crash the game."};
         if (name == "requestMicPermission")
             return {.title = "Request microphone permission",
                     .description = "Show Android's microphone prompt when the permission is missing."};
