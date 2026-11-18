@@ -83,6 +83,7 @@ if(NOT ANDROID)
 endif()
 
 # --- Audio dependencies (Android build only; the host config generator doesn't need them) ---
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 FetchContent_Declare(oboe GIT_REPOSITORY https://github.com/google/oboe.git GIT_TAG 1.9.0)
 set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
 set(OPUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
