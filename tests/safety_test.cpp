@@ -49,6 +49,10 @@ int main() {
     assert(w.valid && w.text == "1.26.52.3" && !isSupportedGameVersion(w));
     assert(!parseGameVersion("/no/version/here").valid);
     assert(!isSupportedGameVersion(parseGameVersion("/x/Minecraft_1.26/mods")));
+    assert(isSupportedGameVersion(parseGameVersion("/x/Minecraft_1.26.62.1/mods")));  // BedrockTools 1.5.12: 1.26.6X.X
+    assert(isSupportedGameVersion(parseGameVersion("/x/Minecraft_1.26.69.9/mods")));
+    assert(!isSupportedGameVersion(parseGameVersion("/x/Minecraft_1.26.70.0/mods")));
+    assert(!isSupportedGameVersion(parseGameVersion("/x/Minecraft_1.25.60.0/mods")));
     assert(isSupportedGameVersion(parseGameVersion("/x/Minecraft_1.26.60/mods"))); // 3-part also ok
 
     puts("safety tests ok");

@@ -68,3 +68,29 @@ pointer was garbage. Now (1) position tracking only starts on 1.26.60.* (version
 folder name; override with `allowUnsupportedVersion`), and (2) every game-memory read goes through
 `safeRead()` (kernel-checked copy) and a plausibility filter, so a bad offset skips the sample instead of
 crashing. Tests: `tests/safety_test.cpp`.
+
+## Internet relay (different networks)
+See `relay/README.md`. `useRelay=true` makes the mod join the relay and send the player's position;
+it logs connection status. Audio is not yet routed through it (next step).
+Tests: `relay/test_server.py`, `tests/relay_integration.py` (C++ client against the real server).
+
+
+## Voice chat (simple proximity voice over the internet relay)
+Targets **BedrockTools 1.5.12 / Minecraft 1.26.6X.X** (1.26.60 - 1.26.69; other versions skip position tracking
+so they can't crash the game).
+
+Data flow:
+    LeviLauncher mic service -> gate + Opus (20 kbps) -> relay (with your position) -> nearby players
+    relay -> jitter buffer -> Opus decode (lost frames concealed) -> distance volume + left/right pan -> speaker
+
+Settings (mod config): `useRelay=true`, `serverHost`, `serverPort`, `room`, `secret`, `micSource="launcher"`,
+`radius` (blocks), `micGainPercent`, `micGate`. See `relay/README.md` to run the server.
+Everyone in a room needs the same `secret`; the server decides who is within `radius`.
+
+Status lines in the log (every 10 s): `Relay: connected | voice packets heard ... | mic connected, voice frames
+sent N (speaking), speakers heard now M`.
+
+Needs: a LeviLauncher build with the microphone service (it declares RECORD_AUDIO), BedrockTools 1.5.12 enabled
+(for the position), headphones recommended. Not encrypted; not yet tested on a phone.
+
+Run every PC-side test: `sh tests/run_host_tests.sh` (needs g++, python3, libopus.so.0).

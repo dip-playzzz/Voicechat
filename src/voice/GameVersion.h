@@ -33,9 +33,10 @@ inline GameVersion parseGameVersion(const std::string &path) {
     return v;
 }
 
-// The memory offsets in the vendored BedrockTools SDK are for 1.26.60.* only.
+// Memory offsets come from the vendored BedrockTools SDK. BedrockTools 1.5.10 listed 1.26.60.X and
+// 1.5.12 lists 1.26.6X.X with byte-identical offset tables, so 1.26.60 - 1.26.69 are accepted.
 inline bool isSupportedGameVersion(const GameVersion &v) {
-    return v.valid && v.major == 1 && v.minor == 26 && v.patch == 60;
+    return v.valid && v.major == 1 && v.minor == 26 && v.patch >= 60 && v.patch <= 69;
 }
 
 } // namespace voicechat

@@ -6,6 +6,8 @@
 #include "voice/AndroidPermission.h"
 #include "voice/GameVersion.h"
 
+#include <random>
+
 #include <pl/Mod.hpp>
 
 namespace voicechat {
@@ -55,7 +57,7 @@ bool VoiceMod::enable() {
         return true;
     }
 
-    // Position tracking reads game memory at fixed offsets that only match Minecraft 1.26.60.*.
+    // Position tracking reads game memory at fixed offsets that only match Minecraft 1.26.60 - 1.26.69.
     // On any other build that can crash the game, so refuse to start it there.
     const GameVersion version = parseGameVersion(self.getModDir().string());
     if (isSupportedGameVersion(version) || mConfig.allowUnsupportedVersion) {
@@ -65,12 +67,61 @@ bool VoiceMod::enable() {
         mTracker->start();
     } else {
         self.getLogger().error(
-            "Minecraft {} is not supported (position offsets are for 1.26.60.*). Position tracking is OFF "
-            "to avoid crashing the game. Use Minecraft 1.26.60.* with the matching BedrockTools.",
+            "Minecraft {} is not supported (position offsets are for 1.26.60 - 1.26.69). Position tracking is OFF "
+            "to avoid crashing the game. Use Minecraft 1.26.6x with BedrockTools 1.5.12.",
             version.valid ? version.text : "(unknown)");
     }
 
-    if (mConfig.loopbackTest && mConfig.micSource == "launcher") {
+    if (mConfig.useRelay) {
+        if (mConfig.secret.empty()) {
+            self.getLogger().error("useRelay is on but 'secret' is empty - set the room secret in the mod config");
+        } else {
+            RelayConfig rc;
+            rc.host = mConfig.serverHost;
+            rc.port = static_cast<std::uint16_t>(mConfig.serverPort);
+            rc.room = mConfig.room;
+            rc.secret = mConfig.secret;
+            rc.playerId = mConfig.playerId != 0 ? static_cast<std::uint32_t>(mConfig.playerId)
+                                                : (std::random_device{}() | 1u);
+            self.getLogger().info("Relay: joining {}:{} as player {} in room '{}'", rc.host, rc.port, rc.playerId, rc.room);
+
+            // Full voice needs the launcher's mic stream; with micSource=direct only the position link runs.
+            if (mConfig.micSource == "launcher") {
+                VoiceSessionConfig vc;
+                vc.mixer.radius = static_cast<float>(mConfig.radius);
+                vc.sender.micGainPercent = mConfig.micGainPercent;
+                vc.sender.gateRms = mConfig.micGate;
+                mSession = std::make_unique<VoiceSession>(
+                    vc, [this] { return mTracker ? mTracker->snapshot() : PlayerSnapshot{}; },
+                    [this](const std::string &msg) { getSelf().getLogger().info("{}", msg); });
+            } else {
+                self.getLogger().warn("Relay voice currently needs micSource=\"launcher\"; with \"direct\" only the position link runs");
+            }
+            mRelay = std::make_unique<RelayClient>(
+                rc, [this](const std::string &msg) { getSelf().getLogger().info("{}", msg); },
+                [this](const ForwardedVoice &v) { if (mSession) mSession->onRemoteVoice(v); });
+            if (mSession) {
+                mSession->attachRelay(mRelay.get());
+                if (!mSession->start()) {
+                    self.getLogger().error("Could not start voice (see lines above); position link still runs");
+                    mSession->attachRelay(nullptr);
+                    mSession.reset();
+                } else {
+                    self.getLogger().info("Voice chat ready: talk and you'll be heard by players in room '{}' within {} blocks", rc.room, mConfig.radius);
+                }
+            }
+            mRelay->start();
+            {
+                std::lock_guard<std::mutex> lock(mRelayMu);
+                mRelayStop = false;
+            }
+            mRelayThread = std::thread([this] { relayPumpLoop(); });
+        }
+    }
+
+    if (mSession) {
+        // relay voice owns the microphone stream; the self-hearing loopback would fight it for the socket
+    } else if (mConfig.loopbackTest && mConfig.micSource == "launcher") {
         // The launcher's VoiceCaptureService owns the microphone and permission prompt;
         // we only listen for its audio stream.
         mSocketLoop = std::make_unique<SocketLoopback>(
@@ -93,6 +144,29 @@ bool VoiceMod::enable() {
                               mConfig.serverHost, mConfig.serverPort, mConfig.radius);
     }
     return true;
+}
+
+void VoiceMod::relayPumpLoop() {
+    // Sends the player's position ~10x/s (also keeps the NAT mapping alive) and logs a status line.
+    auto &log = getSelf().getLogger();
+    auto lastStatus = std::chrono::steady_clock::now();
+    std::unique_lock<std::mutex> lk(mRelayMu);
+    while (!mRelayStop) {
+        lk.unlock();
+        if (mTracker && mRelay) {
+            const PlayerSnapshot s = mTracker->snapshot();
+            if (s.valid) mRelay->sendPosition(s.dimension, s.x, s.y, s.z, s.yaw);
+            if (mSession) mSession->setListener(s);
+        }
+        if (mRelay && std::chrono::steady_clock::now() - lastStatus >= std::chrono::seconds(10)) {
+            lastStatus = std::chrono::steady_clock::now();
+            log.info("Relay: {} | voice packets heard so far: {}{}{}",
+                     mRelay->connected() ? "connected" : "NOT connected", mRelay->voiceReceived(),
+                     mSession ? " | " : "", mSession ? mSession->status() : std::string());
+        }
+        lk.lock();
+        mRelayCv.wait_for(lk, std::chrono::milliseconds(100), [this] { return mRelayStop; });
+    }
 }
 
 void VoiceMod::audioStartupLoop() {
@@ -137,6 +211,21 @@ void VoiceMod::audioStartupLoop() {
 
 bool VoiceMod::disable() {
     getSelf().getLogger().debug("Disabling...");
+    {
+        std::lock_guard<std::mutex> lock(mRelayMu);
+        mRelayStop = true;
+    }
+    mRelayCv.notify_all();
+    if (mRelayThread.joinable()) mRelayThread.join();
+    if (mSession) mSession->stop(); // no more mic/send activity after this
+    if (mRelay) {
+        mRelay->stop();             // no more voice callbacks after this
+        mRelay.reset();
+    }
+    if (mSession) {
+        mSession->attachRelay(nullptr);
+        mSession.reset();
+    }
     {
         std::lock_guard<std::mutex> lock(mAudioMu);
         mAudioStop = true;
