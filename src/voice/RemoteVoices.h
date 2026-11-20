@@ -34,6 +34,7 @@ class RemoteVoices {
     void setListener(bool valid, int dim, float x, float y, float z, float yawDeg); // any thread
     void render(std::int16_t *stereo, int frames);                                  // audio thread
 
+    void setRadius(float blocks);
     int speakerCount() const;
     std::uint64_t lateDropped() const { return late_; }
     std::uint64_t concealed() const { return plc_; }

@@ -83,6 +83,8 @@ if(NOT ANDROID)
 endif()
 
 # --- Audio dependencies (Android build only; the host config generator doesn't need them) ---
+# Oboe and Opus still declare an old cmake_minimum_required; CMake 4 (now on GitHub's runners) refuses
+# that unless told the minimum policy level explicitly.
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 FetchContent_Declare(oboe GIT_REPOSITORY https://github.com/google/oboe.git GIT_TAG 1.9.0)
 set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
@@ -128,6 +130,7 @@ add_library(${MOD_LIBRARY_NAME} SHARED
     src/main.cpp
     src/mod/Config.cpp
     src/mod/VoiceMod.cpp
+    src/mod/ModMenuLink.cpp
     src/voice/Loopback.cpp
     src/voice/PlayerTracker.cpp
     src/voice/AndroidPermission.cpp

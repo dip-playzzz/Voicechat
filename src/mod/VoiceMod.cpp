@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <string>
 
 #include "voice/AndroidPermission.h"
 #include "voice/GameVersion.h"
@@ -52,10 +53,28 @@ bool VoiceMod::load() {
 bool VoiceMod::enable() {
     auto &self = getSelf();
     self.getLogger().debug("Enabling...");
+
+    // The card in LeviLauncher's Mod Menu (toggle + a few sliders). Missing menu = just no card.
+    std::string why;
+    if (mMenu.connect(
+            self.getId(), menuState(), [this](bool enabled) { onMenuToggle(enabled); },
+            [this](std::string_view key, std::string_view value) { onMenuChanged(key, value); }, &why)) {
+        self.getLogger().info("Mod Menu: 'Proximity Voice Chat' card registered");
+    } else {
+        self.getLogger().warn("No Mod Menu card ({}). Settings still work from config.json.", why);
+    }
+
     if (!mConfig.enabled) {
-        self.getLogger().info("voice chat is disabled by config");
+        self.getLogger().info("Voice chat is off (switch it on in the Mod Menu, or set enabled=true in config.json)");
         return true;
     }
+    std::lock_guard<std::mutex> lock(mSvcMu);
+    return startServices();
+}
+
+bool VoiceMod::startServices() {
+    auto &self = getSelf();
+    if (mServicesUp) return true;
 
     // Position tracking reads game memory at fixed offsets that only match Minecraft 1.26.60 - 1.26.69.
     // On any other build that can crash the game, so refuse to start it there.
@@ -81,8 +100,10 @@ bool VoiceMod::enable() {
             rc.port = static_cast<std::uint16_t>(mConfig.serverPort);
             rc.room = mConfig.room;
             rc.secret = mConfig.secret;
-            rc.playerId = mConfig.playerId != 0 ? static_cast<std::uint32_t>(mConfig.playerId)
-                                                : (std::random_device{}() | 1u);
+            // ids below 2^31 only: the voice bridge plugin uses the top bit for its own (Java) players
+            rc.playerId = (mConfig.playerId != 0 ? static_cast<std::uint32_t>(mConfig.playerId)
+                                                 : std::random_device{}()) & 0x7fffffffu;
+            if (rc.playerId == 0) rc.playerId = 1;
             self.getLogger().info("Relay: joining {}:{} as player {} in room '{}'", rc.host, rc.port, rc.playerId, rc.room);
 
             // Full voice needs the launcher's mic stream; with micSource=direct only the position link runs.
@@ -143,6 +164,7 @@ bool VoiceMod::enable() {
         self.getLogger().info("Networked voice not implemented yet (server {}:{}, radius {})",
                               mConfig.serverHost, mConfig.serverPort, mConfig.radius);
     }
+    mServicesUp = true;
     return true;
 }
 
@@ -211,6 +233,19 @@ void VoiceMod::audioStartupLoop() {
 
 bool VoiceMod::disable() {
     getSelf().getLogger().debug("Disabling...");
+    mMenu.disconnect(); // from here on the launcher can no longer call into us
+    {
+        std::lock_guard<std::mutex> lock(mReapplyMu);
+        mReapplyWanted = false;
+    }
+    if (mReapplyThread.joinable()) mReapplyThread.join();
+    std::lock_guard<std::mutex> lock(mSvcMu);
+    stopServices();
+    return true;
+}
+
+void VoiceMod::stopServices() {
+    getSelf().getLogger().debug("Stopping voice services...");
     {
         std::lock_guard<std::mutex> lock(mRelayMu);
         mRelayStop = true;
@@ -244,7 +279,80 @@ bool VoiceMod::disable() {
         mLoopback->stop();
         mLoopback.reset();
     }
-    return true;
+    mServicesUp = false;
+}
+
+// ------------------------------------------------------------------ Mod Menu
+
+MenuState VoiceMod::menuState() const {
+    MenuState s;
+    s.enabled = mConfig.enabled;
+    s.useRelay = mConfig.useRelay;
+    s.micGainPercent = mConfig.micGainPercent;
+    s.micGate = mConfig.micGate;
+    s.radius = mConfig.radius;
+    return s;
+}
+
+void VoiceMod::saveConfig() {
+    if (!mConfigFile) return;
+    mConfigFile->value() = mConfig;
+    if (!mConfigFile->save()) getSelf().getLogger().warn("Could not save config.json");
+}
+
+void VoiceMod::onMenuToggle(bool enabled) {
+    if (mConfig.enabled == enabled) return;
+    mConfig.enabled = enabled;
+    saveConfig();
+    getSelf().getLogger().info("Voice chat {} from the Mod Menu", enabled ? "ON" : "OFF");
+    requestReapply();
+}
+
+void VoiceMod::onMenuChanged(std::string_view keyView, std::string_view valueView) {
+    const std::string key(keyView), value(valueView);
+    bool restart = false;
+    if (key == "useRelay") {
+        const bool v = ModMenuLink::parseBool(value, mConfig.useRelay);
+        restart = v != mConfig.useRelay;
+        mConfig.useRelay = v;
+    } else if (key == "micGainPercent") {
+        mConfig.micGainPercent = ModMenuLink::parseInt(value, mConfig.micGainPercent, 0, 400);
+        std::unique_lock<std::mutex> lock(mSvcMu, std::try_to_lock); // don't stall the UI if services are restarting
+        if (lock.owns_lock() && mSession) mSession->setMicGain(mConfig.micGainPercent);
+    } else if (key == "micGate") {
+        mConfig.micGate = ModMenuLink::parseInt(value, mConfig.micGate, 0, 2000);
+        std::unique_lock<std::mutex> lock(mSvcMu, std::try_to_lock);
+        if (lock.owns_lock() && mSession) mSession->setMicGate(mConfig.micGate);
+    } else if (key == "radius") {
+        mConfig.radius = ModMenuLink::parseInt(value, mConfig.radius, 8, 128);
+        std::unique_lock<std::mutex> lock(mSvcMu, std::try_to_lock);
+        if (lock.owns_lock() && mSession) mSession->setRadius(static_cast<float>(mConfig.radius));
+    } else {
+        return;
+    }
+    saveConfig();
+    getSelf().getLogger().info("Mod Menu: {} = {}", key, value);
+    if (restart) requestReapply();
+}
+
+void VoiceMod::requestReapply() {
+    std::lock_guard<std::mutex> lock(mReapplyMu);
+    mReapplyWanted = true;
+    if (mReapplyRunning) return; // the running worker will see the new request
+    if (mReapplyThread.joinable()) mReapplyThread.join(); // previous worker has finished
+    mReapplyRunning = true;
+    mReapplyThread = std::thread([this] {
+        for (;;) {
+            {
+                std::lock_guard<std::mutex> l(mReapplyMu);
+                if (!mReapplyWanted) { mReapplyRunning = false; return; }
+                mReapplyWanted = false;
+            }
+            std::lock_guard<std::mutex> g(mSvcMu);
+            stopServices();
+            if (mConfig.enabled) startServices();
+        }
+    });
 }
 
 bool VoiceMod::unload() {

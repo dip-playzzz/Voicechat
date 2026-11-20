@@ -25,6 +25,11 @@ int RemoteVoices::speakerCount() const {
     return static_cast<int>(speakers_.size());
 }
 
+void RemoteVoices::setRadius(float blocks) {
+    std::lock_guard<std::mutex> lock(mu_);
+    cfg_.radius = std::clamp(blocks, 1.f, 512.f);
+}
+
 void RemoteVoices::setListener(bool valid, int dim, float x, float y, float z, float yawDeg) {
     std::lock_guard<std::mutex> lock(mu_);
     lValid_ = valid; lDim_ = dim; lx_ = x; ly_ = y; lz_ = z; lyaw_ = yawDeg;

@@ -94,3 +94,15 @@ Needs: a LeviLauncher build with the microphone service (it declares RECORD_AUDI
 (for the position), headphones recommended. Not encrypted; not yet tested on a phone.
 
 Run every PC-side test: `sh tests/run_host_tests.sh` (needs g++, python3, libopus.so.0).
+
+## Java Simple Voice Chat players (bridge)
+`bridge/` is a Paper plugin that connects Simple Voice Chat players to the same relay, so Java SVC players and Bedrock
+mod players can hear each other by proximity. See `bridge/README.md`. Built by its own workflow (`bridge.yml`).
+
+## Mod Menu card
+On start the mod registers a **Proximity Voice Chat** card in LeviLauncher's Mod Menu: an on/off switch, "Use internet
+relay", microphone gain, voice gate and voice radius. Changes are saved to config.json; gain, gate and radius apply
+immediately, the on/off switch and the relay switch restart the voice services (on a background thread).
+Room and secret are text, so they stay in config.json. Log line: `Mod Menu: 'Proximity Voice Chat' card registered`,
+or `No Mod Menu card (<reason>)` if the launcher has none. Tested on a PC against stand-ins for an older and a newer
+launcher layout (`tests/modmenu_test.cpp`); not yet seen on a phone.

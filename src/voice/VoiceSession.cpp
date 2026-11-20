@@ -91,6 +91,16 @@ void VoiceSession::setListener(const PlayerSnapshot &s) {
     d_->remotes.setListener(s.valid, s.dimension, s.x, s.y, s.z, s.yaw);
 }
 
+void VoiceSession::setMicGain(int percent) {
+    cfg_.sender.micGainPercent = percent;
+    if (d_->sender) d_->sender->setGain(percent);
+}
+void VoiceSession::setMicGate(int rms) {
+    cfg_.sender.gateRms = rms;
+    if (d_->sender) d_->sender->setGate(rms);
+}
+void VoiceSession::setRadius(float blocks) { d_->remotes.setRadius(blocks); }
+
 std::string VoiceSession::status() const {
     const Impl *d = d_.get();
     std::string s = "mic ";

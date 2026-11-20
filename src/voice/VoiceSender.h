@@ -27,6 +27,8 @@ class VoiceSender {
 
     bool ok() const { return enc_ != nullptr; }
     void pushMic(const std::int16_t *pcm, int n); // n must be kFrame; one thread at a time
+    void setGain(int percent);
+    void setGate(int rms);
     bool speaking() const { return speaking_.load(); }
     int lastRms() const { return rms_.load(); }
     std::uint64_t framesSent() const { return sent_.load(); }
@@ -35,6 +37,7 @@ class VoiceSender {
     SenderConfig cfg_;
     EmitFn emit_;
     OpusEncoder *enc_ = nullptr;
+    std::atomic<int> gain_{100}, gate_{350}; // adjustable while running (Mod Menu sliders)
     int hang_ = 0;
     std::atomic<bool> speaking_{false};
     std::atomic<int> rms_{0};

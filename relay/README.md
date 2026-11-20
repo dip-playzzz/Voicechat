@@ -4,7 +4,7 @@ Players on **different networks** connect to one relay server over UDP. Players 
 connections, so no router setup is needed on their side. Only the server needs a reachable address.
 
 ## Run the server
-    python3 server.py --port 24454 --radius 32 --secret YOUR_LONG_RANDOM_SECRET
+    python3 server.py --port 24454 --radius 32 --secret YOUR_LONG_RANDOM_SECRET [--max-room 100]
 or one secret per room:
     python3 server.py --secrets-file rooms.json        # {"survival": "s1", "creative": "s2"}
 

@@ -34,6 +34,9 @@ class VoiceSession {
     void attachRelay(RelayClient *relay) { relay_.store(relay); } // nullptr detaches
     void onRemoteVoice(const ForwardedVoice &v);                  // RelayClient's voice callback
     void setListener(const PlayerSnapshot &s);                    // call ~10x/s with the local player
+    void setMicGain(int percent);
+    void setMicGate(int rms);
+    void setRadius(float blocks);
     std::string status() const;
 
   private:
