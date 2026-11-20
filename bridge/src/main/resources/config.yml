@@ -1,0 +1,8 @@
+# Same relay the Bedrock mod players connect to (see relay/README.md in the mod project).
+relay:
+  host: "127.0.0.1"
+  port: 24454
+  room: "default"      # must be the same room name the Bedrock players use
+  secret: ""           # must match the relay's secret for that room; the plugin stays off while empty
+# How far voices carry, in blocks. Use the same number as the relay's --radius.
+radius: 32.0

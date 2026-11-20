@@ -12,7 +12,7 @@ set(MOD_NAME "Proximity Voice Chat" CACHE STRING "LeviLauncher mod display name"
 set(MOD_AUTHOR "voicechat" CACHE STRING "LeviLauncher mod author")
 set(MOD_VERSION "0.1.0" CACHE STRING "LeviLauncher mod version")
 set(MOD_LIBRARY_NAME "voicechat" CACHE STRING "Native library name without lib prefix or .so suffix")
-set(MOD_MINECRAFT_VERSIONS "[\"1.26.*\"]" CACHE STRING "Raw JSON array for manifest minecraft_versions")
+set(MOD_MINECRAFT_VERSIONS "[\"1.26.6X.X\"]" CACHE STRING "Raw JSON array for manifest minecraft_versions")
 set(MOD_ICON "" CACHE STRING "Optional package-relative icon path, such as icon.png")
 
 include(FetchContent)
@@ -83,6 +83,9 @@ if(NOT ANDROID)
 endif()
 
 # --- Audio dependencies (Android build only; the host config generator doesn't need them) ---
+# Oboe and Opus still declare an old cmake_minimum_required; CMake 4 (now on GitHub's runners) refuses
+# that unless told the minimum policy level explicitly.
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 FetchContent_Declare(oboe GIT_REPOSITORY https://github.com/google/oboe.git GIT_TAG 1.9.0)
 set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
 set(OPUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
@@ -127,9 +130,16 @@ add_library(${MOD_LIBRARY_NAME} SHARED
     src/main.cpp
     src/mod/Config.cpp
     src/mod/VoiceMod.cpp
+    src/mod/ModMenuLink.cpp
     src/voice/Loopback.cpp
     src/voice/PlayerTracker.cpp
     src/voice/AndroidPermission.cpp
+    src/voice/MicSocketSource.cpp
+    src/voice/SocketLoopback.cpp
+    src/voice/RelayClient.cpp
+    src/voice/VoiceSender.cpp
+    src/voice/RemoteVoices.cpp
+    src/voice/VoiceSession.cpp
 )
 
 set_target_properties(${MOD_LIBRARY_NAME} PROPERTIES

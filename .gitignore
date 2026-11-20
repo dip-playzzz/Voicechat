@@ -7,3 +7,7 @@ dist/
 *.zip
 *.so
 *.log
+
+# bridge plugin (Gradle)
+bridge/build/
+bridge/.gradle/

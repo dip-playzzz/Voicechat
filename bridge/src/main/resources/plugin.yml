@@ -1,0 +1,7 @@
+name: VoiceChatBridge
+version: ${version}
+main: dev.voicebridge.BridgePlugin
+api-version: '1.21'
+depend: [voicechat]
+softdepend: [Geyser-Spigot, floodgate]
+description: Connects Simple Voice Chat players to the proximity voice relay used by the Bedrock mod.
