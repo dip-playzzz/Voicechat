@@ -3,9 +3,14 @@
 //   g++ -std=c++20 -I<preloader-android>/include -Isrc tests/modmenu_test.cpp src/mod/ModMenuLink.cpp
 #include "mod/ModMenuLink.h"
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <mutex>
 #include <string>
+#include <thread>
 
 using namespace voicechat;
 #define CHECK(c, msg) do { if (!(c)) { std::printf("FAIL: %s (line %d)\n", msg, __LINE__); std::exit(1); } } while (0)
@@ -70,6 +75,33 @@ int main() {
           link.connectWith(reinterpret_cast<ModMenuLink::RegisterFn>(&fakeRegisterNew), &fakeUnregister, "m", st, [](bool) {}, [](auto, auto) {});
           late = gNew.onToggle; }
         late("proximity_voice_chat", true);          // object is gone; must not touch freed memory (ASan checks)
+    }
+    // ---- disconnect waits for a callback which already began before shutting down the mod
+    {
+        ModMenuLink link;
+        std::mutex mu; std::condition_variable cv;
+        bool entered = false, release = false;
+        std::atomic<bool> disconnected{false};
+        CHECK(link.connectWith(reinterpret_cast<ModMenuLink::RegisterFn>(&fakeRegisterNew), &fakeUnregister, "m", st,
+                               [&](bool) {
+                                   std::unique_lock<std::mutex> lock(mu);
+                                   entered = true; cv.notify_all();
+                                   cv.wait(lock, [&] { return release; });
+                               }, [](auto, auto) {}), "register blocking callback");
+        auto callback = gNew.onToggle;
+        std::thread caller([&] { callback("proximity_voice_chat", true); });
+        {
+            std::unique_lock<std::mutex> lock(mu);
+            cv.wait(lock, [&] { return entered; });
+        }
+        std::thread shutdown([&] { link.disconnect(); disconnected = true; });
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        CHECK(!disconnected.load(), "disconnect must wait for active handler");
+        { std::lock_guard<std::mutex> lock(mu); release = true; }
+        cv.notify_all();
+        caller.join(); shutdown.join();
+        CHECK(disconnected.load(), "disconnect finishes after handler exits");
+        callback("proximity_voice_chat", true); // late callback stays harmless
     }
     // ---- older launcher (official header layout)
     {

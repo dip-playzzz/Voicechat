@@ -1,7 +1,7 @@
 #pragma once
 // One voice-chat session on the phone:
-//   launcher mic stream -> VoiceSender (gate + Opus) -> RelayClient.sendVoice(+ player position)
-//   RelayClient voice   -> RemoteVoices (jitter, decode, distance + pan) -> stereo speaker (Oboe)
+//   launcher or direct mic -> VoiceSender (gate + Opus) -> relay (+ player position)
+//   relay -> RemoteVoices (jitter, decode, distance + pan) -> stereo speaker
 #include "voice/PlayerTracker.h"
 #include "voice/RelayClient.h"
 #include "voice/RemoteVoices.h"
@@ -17,7 +17,11 @@ namespace voicechat {
 struct VoiceSessionConfig {
     RemoteVoices::Config mixer;
     SenderConfig sender;
+    std::string micSource = "launcher"; // launcher service, or direct Oboe capture
+    std::string micInputPreset = "voice_recognition";
     std::string micSocketName = "org.levimc.voicechatlevi.audio";
+    bool selfHearing = true;
+    float selfHearingVolume = 1.0f;
 };
 
 class VoiceSession {
@@ -28,11 +32,15 @@ class VoiceSession {
     VoiceSession(VoiceSessionConfig cfg, PositionFn position, LogFn log);
     ~VoiceSession();
 
-    bool start(); // opens the speaker and starts listening for the launcher's mic stream
-    void stop();  // idempotent
+    // Opens playback and, for micSource=launcher, the launcher's microphone socket.
+    bool start();
+    // For micSource=direct, call after Android microphone permission is granted.
+    // The owner must join the permission worker before calling stop().
+    bool startDirectMic();
+    void stop(); // idempotent
 
     void attachRelay(RelayClient *relay) { relay_.store(relay); } // nullptr detaches
-    void onRemoteVoice(const ForwardedVoice &v);                  // RelayClient's voice callback
+    void onRemoteVoice(const ForwardedVoice &v);                  // relay worker thread
     void setListener(const PlayerSnapshot &s);                    // call ~10x/s with the local player
     void setMicGain(int percent);
     void setMicGate(int rms);

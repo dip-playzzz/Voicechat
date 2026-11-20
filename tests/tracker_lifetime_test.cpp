@@ -72,5 +72,19 @@ int main(int argc, char **argv) {
 
     run = false;
     publisher.join();
+
+    // Leaving a world stops ticks. A stale position must not keep the relay active.
+    {
+        auto *t = make();
+        t->start();
+        while (!t->attached()) std::this_thread::yield();
+        bt::events::bus().publish(ev);
+        if (!t->snapshot().valid) { puts("FAIL: fresh snapshot invalid"); return 1; }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2200));
+        if (t->snapshot().valid) { puts("FAIL: stale player snapshot remained valid"); return 1; }
+        bt::events::bus().publish(ev);
+        if (!t->snapshot().valid) { puts("FAIL: snapshot did not recover on a new tick"); return 1; }
+        delete t;
+    }
     printf("lifetime test ok (%d iterations)\n", iterations);
 }

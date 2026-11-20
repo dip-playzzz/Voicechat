@@ -32,12 +32,21 @@ void RemoteVoices::setRadius(float blocks) {
 
 void RemoteVoices::setListener(bool valid, int dim, float x, float y, float z, float yawDeg) {
     std::lock_guard<std::mutex> lock(mu_);
+    valid = valid && std::isfinite(x) && std::isfinite(y) && std::isfinite(z) && std::isfinite(yawDeg);
+    if (lValid_ && (!valid || dim != lDim_)) {
+        // Stop and discard buffered audio when leaving a world or changing dimensions.
+        for (auto &[id, sp] : speakers_) if (sp.dec) opus_decoder_destroy(sp.dec);
+        speakers_.clear();
+        fifoCount_ = 0;
+    }
     lValid_ = valid; lDim_ = dim; lx_ = x; ly_ = y; lz_ = z; lyaw_ = yawDeg;
 }
 
 void RemoteVoices::onPacket(const ForwardedVoice &v) {
-    if (v.opus.empty() || v.opus.size() > 400) return;
+    if (v.opus.empty() || v.opus.size() > 400 || !std::isfinite(v.x) || !std::isfinite(v.y) ||
+        !std::isfinite(v.z)) return;
     std::lock_guard<std::mutex> lock(mu_);
+    if (!lValid_) return;
     auto it = speakers_.find(v.senderId);
     if (it == speakers_.end()) {
         if (static_cast<int>(speakers_.size()) >= cfg_.maxSpeakers) return;
@@ -104,13 +113,10 @@ void RemoteVoices::tick(std::int16_t *out) {
             }
         }
 
-        if (have && (!lValid_ || sp.dim == lDim_)) {
-            float gain = 1.f, pan = 0.f;
-            if (lValid_) {
-                const float dx = sp.x - lx_, dy = sp.y - ly_, dz = sp.z - lz_;
-                gain = proximityGain(std::sqrt(dx * dx + dy * dy + dz * dz), cfg_.radius);
-                pan = stereoPan(lx_, lz_, lyaw_, sp.x, sp.z);
-            }
+        if (have && lValid_ && sp.dim == lDim_) {
+            const float dx = sp.x - lx_, dy = sp.y - ly_, dz = sp.z - lz_;
+            const float gain = proximityGain(std::sqrt(dx * dx + dy * dy + dz * dz), cfg_.radius);
+            const float pan = stereoPan(lx_, lz_, lyaw_, sp.x, sp.z);
             if (gain > 0.f) {
                 const float angle = (pan + 1.f) * 0.7853982f; // constant-power pan: centre = 1.0 on both sides
                 const float gl = gain * std::cos(angle) * 1.4142135f, gr = gain * std::sin(angle) * 1.4142135f;

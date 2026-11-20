@@ -18,9 +18,11 @@ function Invoke-ConfigGeneration {
     & cmake -S $repoRoot -B $configBuildDir -G $Generator `
         2>&1 |
         ForEach-Object { Write-Host $_ }
+    if ($LASTEXITCODE -ne 0) { throw "Host config CMake configure failed ($LASTEXITCODE)." }
 
     & cmake --build $configBuildDir --target levi_generate_config 2>&1 |
         ForEach-Object { Write-Host $_ }
+    if ($LASTEXITCODE -ne 0) { throw "Host config generation failed ($LASTEXITCODE)." }
 
     return ((Resolve-Path (Join-Path $configBuildDir "generated-config")).Path -replace "\\", "/")
 }
@@ -68,8 +70,10 @@ function Invoke-ModBuild {
         -DANDROID_PLATFORM="$AndroidPlatform" `
         -DANDROID_STL="c++_shared" `
         -DLEVI_PACKAGE_CONFIG_DIR="$generatedConfigDir"
+    if ($LASTEXITCODE -ne 0) { throw "Android CMake configure failed ($LASTEXITCODE)." }
 
     cmake --build $buildDir --target levi_package
+    if ($LASTEXITCODE -ne 0) { throw "Android package build failed ($LASTEXITCODE)." }
 }
 
 if ($Abi -eq "all") {

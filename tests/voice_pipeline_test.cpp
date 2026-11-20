@@ -91,13 +91,33 @@ int main() {
         CHECK(goertzel(out, 440) > 30 * goertzel(out, 1500), "440 Hz tone comes out as 440 Hz");
     }
 
-    // ---------- no position known (e.g. unsupported game version): plays at full volume, centred
+    // ---------- no position known or player left the world: never play stale world audio
     {
         RemoteVoices rv({});
         rv.setListener(false, 0, 0, 0, 0, 0);
-        for (size_t i = 0; i < tone.size(); i++) rv.onPacket(fwd(1, (std::uint16_t)i, tone[i], 0, 500, 64, 500));
+        for (size_t i = 0; i < tone.size(); i++) rv.onPacket(fwd(1, (std::uint16_t)i, tone[i], 0, 0, 64, 5));
         auto e = energy(play(rv, 60));
-        CHECK(e.l > 1e8 && std::fabs(e.l / e.r - 1) < 0.05, "no listener position -> centred, not culled");
+        CHECK(e.l == 0 && e.r == 0 && rv.speakerCount() == 0, "no listener position -> silence");
+        rv.setListener(true, 0, 0, 64, 0, 0);
+        for (size_t i = 0; i < tone.size(); i++) rv.onPacket(fwd(1, (std::uint16_t)i, tone[i], 0, 0, 64, 5));
+        CHECK(energy(play(rv, 3)).l > 0, "audio plays with a valid listener position");
+        rv.setListener(false, 0, 0, 0, 0, 0);
+        e = energy(play(rv, 60));
+        CHECK(e.l == 0 && e.r == 0 && rv.speakerCount() == 0, "leaving the world discards buffered audio");
+    }
+
+    // ---------- two nearby speakers can be mixed at the same time
+    {
+        auto other = encode(sine(30, 660, 5000));
+        RemoteVoices rv({});
+        rv.setListener(true, 0, 0, 64, 0, 0);
+        for (int i = 0; i < 25; i++) {
+            rv.onPacket(fwd(1, static_cast<std::uint16_t>(i), tone[i], 0, 0, 64, 5));
+            rv.onPacket(fwd(2, static_cast<std::uint16_t>(i), other[i], 0, 0, 64, 5));
+        }
+        auto mixed = play(rv, 25);
+        const double a = goertzel(mixed, 440), b = goertzel(mixed, 660), noise = goertzel(mixed, 1500);
+        CHECK(a > 20 * noise && b > 20 * noise, "both simultaneous speakers survive mixing");
     }
 
     // ---------- render() chunking doesn't change the audio

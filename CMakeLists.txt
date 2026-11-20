@@ -79,6 +79,37 @@ if(NOT ANDROID)
         VERBATIM
     )
 
+    # Compile the Android mod's lifecycle/wiring on the host as well. The SDK and
+    # config headers are real; only Android logging and the JavaVM pointer are stubbed.
+    # This catches broken startup code that the standalone voice tests cannot see.
+    add_library(voicechat_mod_compile_check OBJECT EXCLUDE_FROM_ALL src/mod/VoiceMod.cpp)
+    target_include_directories(voicechat_mod_compile_check PRIVATE
+        tests/host_stubs src "${LEVI_PRELOADER_INCLUDE_DIR}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/bedrocktools/include")
+    target_link_libraries(voicechat_mod_compile_check PRIVATE
+        nlohmann_json::nlohmann_json Boost::pfr magic_enum::magic_enum fmt::fmt)
+
+    option(VOICECHAT_BUILD_HOST_INTEGRATION "Build the simulated-device multiplayer integration test" OFF)
+    if(VOICECHAT_BUILD_HOST_INTEGRATION)
+        find_package(Threads REQUIRED)
+        find_library(OPUS_TEST_LIBRARY NAMES opus libopus.so.0 REQUIRED)
+        add_executable(voicechat_mod_integration_test
+            tests/voice_mod_integration_test.cpp
+            src/mod/Config.cpp src/mod/VoiceMod.cpp src/mod/ModMenuLink.cpp
+            src/voice/Loopback.cpp src/voice/PlayerTracker.cpp src/voice/MicSocketSource.cpp
+            src/voice/SocketLoopback.cpp src/voice/RelayClient.cpp src/voice/VoiceSender.cpp
+            src/voice/RemoteVoices.cpp src/voice/VoiceSession.cpp)
+        target_compile_definitions(voicechat_mod_integration_test PRIVATE VOICECHAT_TEST)
+        target_include_directories(voicechat_mod_integration_test PRIVATE
+            tests/host_stubs tests/host_opus src "${LEVI_PRELOADER_INCLUDE_DIR}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/third_party/bedrocktools/include")
+        target_link_libraries(voicechat_mod_integration_test PRIVATE
+            nlohmann_json::nlohmann_json Boost::pfr magic_enum::magic_enum fmt::fmt
+            Threads::Threads "${OPUS_TEST_LIBRARY}" ${CMAKE_DL_LIBS})
+        # PlayerTracker finds the simulated BedrockTools_GetApi with dlsym.
+        set_target_properties(voicechat_mod_integration_test PROPERTIES ENABLE_EXPORTS ON)
+    endif()
+
     return()
 endif()
 
@@ -155,7 +186,8 @@ target_include_directories(${MOD_LIBRARY_NAME}
 
 target_compile_options(${MOD_LIBRARY_NAME}
     PRIVATE
-        $<$<COMPILE_LANG_AND_ID:CXX,Clang,GNU>:-fvisibility=hidden -fvisibility-inlines-hidden>
+        $<$<COMPILE_LANG_AND_ID:CXX,Clang,GNU>:-fvisibility=hidden>
+        $<$<COMPILE_LANG_AND_ID:CXX,Clang,GNU>:-fvisibility-inlines-hidden>
 )
 
 target_link_options(${MOD_LIBRARY_NAME}

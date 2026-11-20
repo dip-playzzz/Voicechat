@@ -65,6 +65,41 @@ int main(int argc, char **argv) {
     CHECK(tone > 1e9 && tone > 30 * other, "B hears A's 440 Hz tone");
     double eC = 0; for (auto s : outC) eC += double(s) * s;
     CHECK(eC == 0, "C hears silence");
-    std::printf("VOICE E2E OK (B got %llu packets)\n", (unsigned long long)B.client.voiceReceived());
+
+    // Move C nearby. A and C talk at the same time; B must hear both, and each
+    // speaker must also receive the other (but not its own relay packets).
+    C.mix.setListener(true, 0, -8, 64, 0, 0);
+    auto placeAllNear = [&] {
+        A.sendPosition(0, 0, 64, 0, 0);
+        B.client.sendPosition(0, 8, 64, 0, 0);
+        C.client.sendPosition(0, -8, 64, 0, 0);
+    };
+    placeAllNear();
+    std::this_thread::sleep_for(300ms);
+    const auto aBefore = A.voiceReceived(), bBefore = B.client.voiceReceived(), cBefore = C.client.voiceReceived();
+    std::uint16_t seqC = 0;
+    VoiceSender micC({}, [&](const std::uint8_t *p, int n) { C.client.sendVoice(seqC++, 0, -8, 64, 0, 0, p, n); });
+    for (int f = 0; f < 55; ++f) {
+        std::int16_t a[320], c[320];
+        for (int i = 0; i < 320; ++i) {
+            a[i] = static_cast<std::int16_t>(6000 * std::sin(2 * 3.14159265358979 * 440 * ((f + 75) * 320 + i) / 16000.0));
+            c[i] = static_cast<std::int16_t>(6000 * std::sin(2 * 3.14159265358979 * 660 * (f * 320 + i) / 16000.0));
+        }
+        mic.pushMic(a, 320); micC.pushMic(c, 320);
+        if (f % 5 == 0) placeAllNear();
+        std::this_thread::sleep_for(20ms);
+    }
+    std::this_thread::sleep_for(300ms);
+    CHECK(A.voiceReceived() - aBefore >= 48, "A hears C");
+    CHECK(C.client.voiceReceived() - cBefore >= 48, "C hears A");
+    CHECK(B.client.voiceReceived() - bBefore >= 96, "B receives both speakers");
+    std::vector<std::int16_t> mixed(40 * 320 * 2);
+    B.mix.render(mixed.data(), 40 * 320);
+    const double aTone = goertzel(mixed.data(), mixed.size(), 440);
+    const double cTone = goertzel(mixed.data(), mixed.size(), 660);
+    const double noise = goertzel(mixed.data(), mixed.size(), 1500);
+    CHECK(aTone > 20 * noise && cTone > 20 * noise && aTone > 1e8 && cTone > 1e8,
+          "B hears both tones mixed together");
+    std::printf("VOICE E2E OK (three players, simultaneous two-way voice)\n");
     A.stop(); B.client.stop(); C.client.stop();
 }

@@ -2,6 +2,7 @@
 
 #include "voice/RingBuffer.h"
 
+#include <cstring> // Oboe 1.9's umbrella header uses memset
 #include <android/log.h>
 #include <oboe/Oboe.h>
 #include <opus.h>
@@ -95,7 +96,7 @@ struct Loopback::Impl : oboe::AudioStreamDataCallback {
                 unsigned char packet[kMaxPacket];
                 int n = opus_encode(enc, pending.data(), kFrame, packet, kMaxPacket);
                 if (n > 0) {
-                    // TODO: send `packet` (n bytes) to the relay instead of decoding locally.
+                    // Standalone self-hearing test; multiplayer uses VoiceSession instead.
                     int16_t decoded[kFrame];
                     int got = opus_decode(dec, packet, n, decoded, kFrame, 0);
                     if (got > 0) {
@@ -182,8 +183,13 @@ bool Loopback::start(const Options &options) {
         stop();
         return false;
     }
-    d_->out->requestStart();
-    d_->in->requestStart();
+    oboe::Result r = d_->out->requestStart();
+    if (r == oboe::Result::OK) r = d_->in->requestStart();
+    if (r != oboe::Result::OK) {
+        LOGE("start audio failed: %s", oboe::convertToText(r));
+        stop();
+        return false;
+    }
     return true;
 }
 

@@ -8,22 +8,25 @@ Each client proves it knows the room secret in its HELLO (HMAC, replay-protected
 same room and dimension within `radius` blocks. Per-client rate limits, room/server caps and
 silent drops of anything malformed keep a public server from being trivially abused.
 """
-import argparse, asyncio, json, os, struct, time
+import argparse, asyncio, json, math, os, struct, time
 import hmac as _hmac
 import protocol as P
 
 TIMEOUT = 10.0          # seconds without packets -> client dropped
+POSITION_TIMEOUT = 3.0 # don't deliver to a player who stopped reporting a position
 HELLO_WINDOW = 60       # allowed clock skew, seconds
 RATE_PPS, RATE_BURST = 200.0, 400.0
 
 
 class Client:
-    __slots__ = ("pid", "room", "session", "dim", "pos", "last", "tokens", "tstamp")
+    __slots__ = ("pid", "room", "session", "dim", "pos", "position_at", "last", "tokens", "tstamp")
 
     def __init__(self, pid, room, session):
         now = time.monotonic()
         self.pid, self.room, self.session = pid, room, session
-        self.dim, self.pos, self.last = 0, (0.0, 0.0, 0.0), now
+        # A new connection has no position until it sends one. Treating it as (0,0,0)
+        # would let a player outside a world hear anyone near the origin.
+        self.dim, self.pos, self.position_at, self.last = 0, None, 0.0, now
         self.tokens, self.tstamp = RATE_BURST, now
 
 
@@ -101,17 +104,17 @@ class Relay(asyncio.DatagramProtocol):
         elif typ == P.PING:
             self.transport.sendto(P.header(P.PONG), addr)
         elif typ == P.POS:
-            c.dim, c.pos = f["dim"], f["pos"]
+            c.dim, c.pos, c.position_at = f["dim"], f["pos"], now
         elif typ == P.VOICE:
-            c.dim, c.pos = f["dim"], f["pos"]
+            c.dim, c.pos, c.position_at = f["dim"], f["pos"], now
             self.stats["voice_in"] += 1
-            self.forward(addr, c, f)
+            self.forward(addr, c, f, now)
 
     def on_hello(self, f, addr):
         if self._limited(self.ip_hello, addr[0], 30):
             return                                   # silent drop: don't help floods
         room, pid = f["room"], f["player_id"]
-        if not (0 < len(room) <= 64):
+        if not (0 < len(room.encode("utf-8")) <= 64):
             return self._reject(addr, P.R_BAD_HELLO)
         secret = self.secrets.get(room, self.secret)
         if not secret:
@@ -124,14 +127,18 @@ class Relay(asyncio.DatagramProtocol):
             return self._reject(addr, P.R_STALE)
         self.seen[(pid, f["nonce"])] = wall + 2 * HELLO_WINDOW
 
+        # A socket can reconnect with a different player or room, and a player can
+        # reconnect from a new address. Check the resulting counts *before* removing
+        # anything, then remove both old identities and their by_pid entries.
         old = self.by_pid.get((room, pid))
-        if old is not None and old != addr:
-            self.drop(old)                           # same player reconnecting from a new address
-        in_room = sum(1 for c in self.clients.values() if c.room == room)
-        if addr not in self.clients and (in_room >= self.max_room):
+        replaced = {a for a in (addr, old) if a in self.clients}
+        in_room = sum(1 for a, c in self.clients.items() if c.room == room and a not in replaced)
+        if in_room >= self.max_room:
             return self._reject(addr, P.R_ROOM_FULL)
-        if addr not in self.clients and len(self.clients) >= self.max_total:
+        if len(self.clients) - len(replaced) >= self.max_total:
             return self._reject(addr, P.R_SERVER_FULL)
+        for a in replaced:
+            self.drop(a)
 
         session = struct.unpack("<Q", os.urandom(8))[0]
         self.clients[addr] = Client(pid, room, session)
@@ -139,13 +146,14 @@ class Relay(asyncio.DatagramProtocol):
         self.log(f"[+] player {pid} joined room '{room}' from {addr[0]}")
         self.transport.sendto(P.header(P.ACCEPT) + struct.pack("<Q", session), addr)
 
-    def forward(self, src_addr, src, f):
+    def forward(self, src_addr, src, f, now):
         pkt = (P.header(P.VOICE_FWD)
                + P.FWD_HEAD.pack(src.pid, f["seq"], f["dim"], *f["pos"], f["yaw"])
                + struct.pack("<H", len(f["opus"])) + f["opus"])
         r2 = self.radius * self.radius
         for addr, c in self.clients.items():
-            if addr == src_addr or c.room != src.room or c.dim != src.dim:
+            if (addr == src_addr or c.room != src.room or c.dim != src.dim or c.pos is None
+                    or now - c.position_at > POSITION_TIMEOUT):
                 continue
             dx, dy, dz = (c.pos[i] - src.pos[i] for i in range(3))
             if dx * dx + dy * dy + dz * dz <= r2:
@@ -164,7 +172,19 @@ async def main():
     ap.add_argument("--max-room", type=int, default=32)
     ap.add_argument("--max-total", type=int, default=512)
     a = ap.parse_args()
-    secrets = json.load(open(a.secrets_file)) if a.secrets_file else {}
+    if not 1 <= a.port <= 65535:
+        ap.error("port must be between 1 and 65535")
+    if not math.isfinite(a.radius) or a.radius <= 0:
+        ap.error("radius must be a positive, finite number")
+    if a.max_room < 1 or a.max_total < 1:
+        ap.error("max-room and max-total must be positive")
+    if a.secrets_file:
+        with open(a.secrets_file, encoding="utf-8") as f:
+            secrets = json.load(f)
+        if not isinstance(secrets, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in secrets.items()):
+            ap.error("secrets-file must be a JSON object of room names and string secrets")
+    else:
+        secrets = {}
     if not a.secret and not secrets:
         raise SystemExit("refusing to start without a secret: use --secret or --secrets-file")
     loop = asyncio.get_running_loop()

@@ -36,8 +36,8 @@ class RemoteVoices {
 
     void setRadius(float blocks);
     int speakerCount() const;
-    std::uint64_t lateDropped() const { return late_; }
-    std::uint64_t concealed() const { return plc_; }
+    std::uint64_t lateDropped() const { std::lock_guard<std::mutex> lock(mu_); return late_; }
+    std::uint64_t concealed() const { std::lock_guard<std::mutex> lock(mu_); return plc_; }
 
   private:
     struct Speaker {

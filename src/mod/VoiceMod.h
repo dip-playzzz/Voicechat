@@ -39,12 +39,13 @@ class VoiceMod {
     void onMenuToggle(bool enabled);
     void onMenuChanged(std::string_view key, std::string_view value);
     MenuState menuState() const;
-    void saveConfig();
-    void audioStartupLoop();
+    void saveConfigLocked(); // caller holds mConfigMu
+    void audioStartupLoop(ModConfig config, VoiceSession *session);
     void relayPumpLoop();
 
     ll::mod::NativeMod &mSelf;
-    ModConfig mConfig;
+    mutable std::mutex mConfigMu;
+    ModConfig mConfig; // guarded by mConfigMu once the menu is connected
     std::optional<pl::config::ConfigFile<ModConfig>> mConfigFile;
     std::unique_ptr<Loopback> mLoopback;
     std::unique_ptr<SocketLoopback> mSocketLoop;

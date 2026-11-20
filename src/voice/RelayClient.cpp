@@ -10,6 +10,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <random>
@@ -103,12 +104,27 @@ bool RelayClient::openSocket() {
         note("dns", "Relay: cannot resolve '" + cfg_.host + "': " + gai_strerror(rc));
         return false;
     }
+    std::vector<addrinfo *> addresses;
+    for (addrinfo *ai = res; ai; ai = ai->ai_next) addresses.push_back(ai);
+    // The bundled relay listens on IPv4 by default. Prefer it for dual-stack names,
+    // then rotate results on reconnect: UDP connect() alone cannot tell us that a
+    // particular address or address family is unreachable.
+    std::stable_sort(addresses.begin(), addresses.end(), [](const addrinfo *a, const addrinfo *b) {
+        return a->ai_family == AF_INET && b->ai_family != AF_INET;
+    });
     int fd = -1;
-    for (addrinfo *ai = res; ai; ai = ai->ai_next) {
+    const std::size_t start = nextAddress_ % addresses.size();
+    for (std::size_t i = 0; i < addresses.size(); ++i) {
+        const std::size_t index = (start + i) % addresses.size();
+        addrinfo *ai = addresses[index];
         fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (fd < 0) continue;
-        // connect() on UDP just fixes the peer: the kernel then drops datagrams from anyone else.
-        if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) break;
+        // connect() on UDP fixes the peer; the kernel drops datagrams from anyone else.
+        if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) {
+            currentAddress_ = index;
+            nextAddress_ = index + 1;
+            break;
+        }
         close(fd);
         fd = -1;
     }
@@ -189,6 +205,7 @@ void RelayClient::handle(const std::uint8_t *d, std::size_t n) {
         std::uint64_t s;
         if (!get(d, n, o, s)) return;
         { std::lock_guard<std::mutex> lock(mu_); session_ = s; }
+        nextAddress_ = currentAddress_; // try the last working address first after a disconnect
         const bool wasConnected = connected_.exchange(true);
         if (!wasConnected) {
             connects_++;
@@ -270,8 +287,12 @@ void RelayClient::run() {
                 lastHello = now;
                 helloGap = std::min(helloGap * 2, std::chrono::milliseconds(5000)); // back off while unreachable
             }
-            // no answer for a long time: re-resolve DNS / reopen the socket
-            if (now - lastRecv > std::chrono::seconds(20)) closeSocket();
+            // No answer: retry DNS / another address, and explain the common firewall problem.
+            if (now - lastRecv > std::chrono::seconds(20)) {
+                note("timeout", "Relay: no response from " + cfg_.host + ":" + std::to_string(cfg_.port) +
+                                    " (check the host and UDP firewall); trying another address");
+                closeSocket();
+            }
         } else {
             helloGap = std::chrono::milliseconds(1000);
             if (now - lastPing >= std::chrono::seconds(2)) {

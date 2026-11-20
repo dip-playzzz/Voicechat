@@ -7,6 +7,8 @@ dist/
 *.zip
 *.so
 *.log
+__pycache__/
+*.pyc
 
 # bridge plugin (Gradle)
 bridge/build/

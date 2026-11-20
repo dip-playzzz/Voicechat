@@ -27,6 +27,12 @@ public:
         return n;
     }
 
+    // Only call after both producer and consumer have stopped.
+    void clear() {
+        r_.store(0, std::memory_order_relaxed);
+        w_.store(0, std::memory_order_relaxed);
+    }
+
 private:
     std::vector<T> buf_;
     std::atomic<size_t> w_{0}, r_{0};

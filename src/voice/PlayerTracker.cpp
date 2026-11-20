@@ -27,8 +27,12 @@ namespace {
 struct Shared {
     std::mutex mu;
     PlayerSnapshot snap;
+    std::chrono::steady_clock::time_point lastTick{};
     std::atomic<bool> active{false};
 };
+
+// Leaving a world stops player ticks. Never keep sending the last known location forever.
+constexpr auto kMaxSnapshotAge = std::chrono::seconds(2);
 
 Shared &shared() {
     static Shared *s = new Shared; // leaked on purpose
@@ -60,16 +64,15 @@ bool readPlayer(bt::sdk::Player *p, PlayerSnapshot &out) {
     if (!plausiblePlayerSample(pos, rot)) return false;
 
     // Dimension: Actor::mDimension -> Dimension::mBlockSource -> virtual getDimensionId().
-    int dim = 0;
+    // If it cannot be read, fail closed rather than treating an unknown dimension as overworld.
     std::uintptr_t dimension = 0, blockSource = 0, vtable = 0, fn = 0, probe = 0;
-    if (safeReadPtr(base + off::Actor::mDimension, dimension) && dimension &&
-        safeReadPtr(dimension + off::Dimension::mBlockSource, blockSource) && blockSource &&
-        safeReadPtr(blockSource, vtable) && vtable &&
-        safeReadPtr(vtable + sizeof(void *) * off::VTable::BlockSource_getDimensionId, fn) && fn &&
-        safeReadPtr(fn, probe)) { // the function address must at least be readable memory
-        const int id = reinterpret_cast<int (*)(void *)>(fn)(reinterpret_cast<void *>(blockSource));
-        if (id >= 0 && id <= 2) dim = id;
-    }
+    if (!safeReadPtr(base + off::Actor::mDimension, dimension) || !dimension ||
+        !safeReadPtr(dimension + off::Dimension::mBlockSource, blockSource) || !blockSource ||
+        !safeReadPtr(blockSource, vtable) || !vtable ||
+        !safeReadPtr(vtable + sizeof(void *) * off::VTable::BlockSource_getDimensionId, fn) || !fn ||
+        !safeReadPtr(fn, probe)) return false;
+    const int dim = reinterpret_cast<int (*)(void *)>(fn)(reinterpret_cast<void *>(blockSource));
+    if (dim < 0 || dim > 2) return false;
 
     out.valid = true;
     out.x = pos[0]; out.y = pos[1]; out.z = pos[2];
@@ -92,6 +95,7 @@ void onTick(bt::events::EventType type, void *payload, void *user) {
     if (!s->active.load(std::memory_order_relaxed)) return; // stop() ran meanwhile
     next.ticks = s->snap.ticks + 1;
     s->snap = next;
+    s->lastTick = std::chrono::steady_clock::now();
 }
 
 // --- Finding BedrockTools -------------------------------------------------------------
@@ -254,7 +258,10 @@ void PlayerTracker::run() {
 
 PlayerSnapshot PlayerTracker::snapshot() const {
     std::lock_guard<std::mutex> lock(shared().mu);
-    return shared().snap;
+    PlayerSnapshot result = shared().snap;
+    if (result.valid && std::chrono::steady_clock::now() - shared().lastTick > kMaxSnapshotAge)
+        result.valid = false;
+    return result;
 }
 
 } // namespace voicechat

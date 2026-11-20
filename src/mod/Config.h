@@ -26,9 +26,9 @@ struct ModConfig {
     // preset issue, not the device. Default is voice_recognition (speech-first).
     // Options: voice_recognition | voice_communication | generic | unprocessed | camcorder
     std::string micInputPreset = "voice_recognition";
-    float micGainDb = 6.0f; // pre-encode gain; speech is often quiet after platform NS
+    float micGainDb = 6.0f; // gain for the standalone direct self-hearing test
 
-    // Legacy alias kept so old configs still load; prefer selfHearing.
+    // Retained so old config files still load. selfHearing is the authoritative switch.
     bool loopbackTest = true;
 
     std::string serverHost = "127.0.0.1";
@@ -70,8 +70,7 @@ template <> struct pl::config::Schema<voicechat::ModConfig> {
             return {.title = "Enabled", .description = "Turns the voice chat mod on or off."};
         if (name == "selfHearing")
             return {.title = "Self Hearing",
-                    .description = "Hear your own voice (default ON). Resound Compatible when "
-                                   "Through Resound is also enabled."};
+                    .description = "Monitor your microphone (default ON). Uses direct playback; headphones are recommended."};
         if (name == "throughResound")
             return {.title = "Through Resound",
                     .description = "Route self-hearing through the game mixer so Resound "
@@ -87,13 +86,12 @@ template <> struct pl::config::Schema<voicechat::ModConfig> {
                                    "voice_communication, generic, unprocessed, camcorder."};
         if (name == "micGainDb")
             return {.title = "Mic gain (dB)",
-                    .description = "Pre-encode microphone gain. Raise if your voice is too quiet "
-                                   "(default +6 dB). Range roughly -12 .. +24."};
+                    .description = "Gain for the standalone direct self-hearing test. For multiplayer use Microphone gain (%)."};
         if (name == "loopbackTest")
             return {.title = "Loopback test (legacy)",
-                    .description = "Legacy name for Self Hearing. Prefer the Self Hearing toggle."};
+                    .description = "Retained for old configs. Use Self Hearing to control playback."};
         if (name == "serverHost")
-            return {.title = "Server host", .description = "Voice relay server address."};
+            return {.title = "Server host", .description = "Voice relay address. 127.0.0.1 means this phone, not another device."};
         if (name == "serverPort")
             return {.title = "Server port", .description = "Voice relay server UDP port."};
         if (name == "radius")
@@ -116,7 +114,7 @@ template <> struct pl::config::Schema<voicechat::ModConfig> {
             return {.title = "Player ID", .description = "0 = random each launch. Must be unique within a room."};
         if (name == "allowUnsupportedVersion")
             return {.title = "Allow unsupported Minecraft version",
-                    .description = "Developer only. Position tracking is made for 1.26.60.*; turning this on elsewhere can crash the game."};
+                    .description = "Developer only. Position tracking is made for 1.26.60-1.26.69; turning this on elsewhere can crash the game."};
         if (name == "requestMicPermission")
             return {.title = "Request microphone permission",
                     .description = "Show Android's microphone prompt when the permission is missing."};

@@ -3,10 +3,12 @@
 #include "voice/MicSocketSource.h"
 #include "voice/RingBuffer.h"
 
+#include <cstring> // Oboe 1.9's umbrella header uses memset
 #include <android/log.h>
 #include <oboe/Oboe.h>
 #include <opus.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -27,6 +29,7 @@ struct SocketLoopback::Impl : oboe::AudioStreamDataCallback {
     std::shared_ptr<oboe::AudioStream> out;
     OpusEncoder *enc = nullptr;
     OpusDecoder *dec = nullptr;
+    float volume = 1.f;
     SpscRing<int16_t> playback{kRate}; // ~1 s; producer = socket thread, consumer = audio callback
     std::unique_ptr<MicSocketSource> source;
 
@@ -63,17 +66,21 @@ struct SocketLoopback::Impl : oboe::AudioStreamDataCallback {
         unsigned char packet[kMaxPacket];
         const int len = opus_encode(enc, s, n, packet, kMaxPacket);
         if (len <= 0) return;
-        // TODO: send `packet` (len bytes) to the relay instead of decoding locally.
         int16_t decoded[kFrame];
         const int got = opus_decode(dec, packet, len, decoded, kFrame, 0);
-        if (got > 0) playback.write(decoded, got);
+        if (got > 0) {
+            for (int i = 0; i < got; ++i)
+                decoded[i] = static_cast<int16_t>(std::clamp(static_cast<int>(decoded[i] * volume), -32768, 32767));
+            playback.write(decoded, got);
+        }
     }
 };
 
 SocketLoopback::SocketLoopback(LogFn log) : d_(new Impl(std::move(log))) {}
 SocketLoopback::~SocketLoopback() { stop(); }
 
-bool SocketLoopback::start() {
+bool SocketLoopback::start(float volume) {
+    d_->volume = std::isfinite(volume) ? std::clamp(volume, 0.f, 2.f) : 1.f;
     int err = 0;
     d_->enc = opus_encoder_create(kRate, 1, OPUS_APPLICATION_VOIP, &err);
     d_->dec = opus_decoder_create(kRate, 1, &err);
@@ -94,13 +101,18 @@ bool SocketLoopback::start() {
         ->setSampleRate(kRate)
         ->setSampleRateConversionQuality(oboe::SampleRateConversionQuality::Medium)
         ->setDataCallback(d_.get());
-    const oboe::Result r = b.openStream(d_->out);
+    oboe::Result r = b.openStream(d_->out);
     if (r != oboe::Result::OK) {
         LOGE("open output failed: %s", oboe::convertToText(r));
         stop();
         return false;
     }
-    d_->out->requestStart();
+    r = d_->out->requestStart();
+    if (r != oboe::Result::OK) {
+        LOGE("start output failed: %s", oboe::convertToText(r));
+        stop();
+        return false;
+    }
 
     Impl *impl = d_.get();
     d_->source = std::make_unique<MicSocketSource>(

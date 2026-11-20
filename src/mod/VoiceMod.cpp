@@ -1,7 +1,9 @@
 #include "mod/VoiceMod.h"
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <string>
 
 #include "voice/AndroidPermission.h"
@@ -39,12 +41,33 @@ bool VoiceMod::load() {
         return false;
     }
 
+    // Older configs only had loopbackTest. Read it before ConfigFile merges in
+    // the new defaults, so upgrading does not unexpectedly turn self-hearing on.
+    std::optional<bool> legacySelfHearing;
+    try {
+        std::ifstream stream(self.getConfigDir() / "config.json");
+        if (stream) {
+            nlohmann::json old;
+            stream >> old;
+            if (old.is_object() && !old.contains("selfHearing") && old.contains("loopbackTest") &&
+                old["loopbackTest"].is_boolean())
+                legacySelfHearing = old["loopbackTest"].get<bool>();
+        }
+    } catch (const std::exception &) {
+        // ConfigFile handles malformed files and reports the error itself.
+    }
+
     mConfigFile.emplace();
     if (!mConfigFile->load()) {
         self.getLogger().warn("Failed to load typed config");
         return false;
     }
     mConfig = mConfigFile->value();
+    if (legacySelfHearing.has_value()) {
+        mConfig.selfHearing = *legacySelfHearing;
+        mConfigFile->value() = mConfig;
+        if (!mConfigFile->save()) self.getLogger().warn("Could not save migrated self-hearing setting");
+    }
 
     self.getLogger().info("Loaded {} from {}", self.getName(), self.getModDir().string());
     return true;
@@ -64,7 +87,12 @@ bool VoiceMod::enable() {
         self.getLogger().warn("No Mod Menu card ({}). Settings still work from config.json.", why);
     }
 
-    if (!mConfig.enabled) {
+    bool enabled;
+    {
+        std::lock_guard<std::mutex> lock(mConfigMu);
+        enabled = mConfig.enabled;
+    }
+    if (!enabled) {
         self.getLogger().info("Voice chat is off (switch it on in the Mod Menu, or set enabled=true in config.json)");
         return true;
     }
@@ -75,14 +103,18 @@ bool VoiceMod::enable() {
 bool VoiceMod::startServices() {
     auto &self = getSelf();
     if (mServicesUp) return true;
+    ModConfig config;
+    {
+        std::lock_guard<std::mutex> lock(mConfigMu);
+        config = mConfig;
+    }
 
-    // Position tracking reads game memory at fixed offsets that only match Minecraft 1.26.60 - 1.26.69.
-    // On any other build that can crash the game, so refuse to start it there.
+    // Position offsets only match Minecraft 1.26.60 - 1.26.69. Never read other builds by default.
     const GameVersion version = parseGameVersion(self.getModDir().string());
-    if (isSupportedGameVersion(version) || mConfig.allowUnsupportedVersion) {
+    if (isSupportedGameVersion(version) || config.allowUnsupportedVersion) {
         self.getLogger().info("Minecraft {} - position tracking enabled", version.valid ? version.text : "(unknown)");
         mTracker = std::make_unique<PlayerTracker>(
-            [this](const std::string &msg) { getSelf().getLogger().info("{}", msg); }, mConfig.logPosition);
+            [this](const std::string &msg) { getSelf().getLogger().info("{}", msg); }, config.logPosition);
         mTracker->start();
     } else {
         self.getLogger().error(
@@ -91,28 +123,53 @@ bool VoiceMod::startServices() {
             version.valid ? version.text : "(unknown)");
     }
 
-    if (mConfig.useRelay) {
-        if (mConfig.secret.empty()) {
-            self.getLogger().error("useRelay is on but 'secret' is empty - set the room secret in the mod config");
+    const bool sourceOk = config.micSource == "launcher" || config.micSource == "direct";
+    if (!sourceOk) self.getLogger().error("Unknown micSource '{}': use 'launcher' or 'direct'", config.micSource);
+
+    if (config.useRelay && sourceOk) {
+        std::string error;
+        if (config.secret.empty()) error = "'secret' is empty";
+        else if (config.serverHost.empty()) error = "'serverHost' is empty";
+        else if (config.serverPort < 1 || config.serverPort > 65535) error = "'serverPort' must be 1-65535";
+        else if (config.playerId < 0) error = "'playerId' must be zero (random) or a positive integer";
+        else if (config.room.empty() || config.room.size() > 64) error = "'room' must be 1-64 UTF-8 bytes";
+        if (!error.empty()) {
+            self.getLogger().error("Cannot start multiplayer: {}. Fix the mod config and restart voice services.", error);
         } else {
             RelayConfig rc;
-            rc.host = mConfig.serverHost;
-            rc.port = static_cast<std::uint16_t>(mConfig.serverPort);
-            rc.room = mConfig.room;
-            rc.secret = mConfig.secret;
-            // ids below 2^31 only: the voice bridge plugin uses the top bit for its own (Java) players
-            rc.playerId = (mConfig.playerId != 0 ? static_cast<std::uint32_t>(mConfig.playerId)
-                                                 : std::random_device{}()) & 0x7fffffffu;
+            rc.host = config.serverHost;
+            rc.port = static_cast<std::uint16_t>(config.serverPort);
+            rc.room = config.room;
+            rc.secret = config.secret;
+            // The bridge reserves the top bit for Java players.
+            rc.playerId = (config.playerId != 0 ? static_cast<std::uint32_t>(config.playerId)
+                                                : std::random_device{}()) & 0x7fffffffu;
             if (rc.playerId == 0) rc.playerId = 1;
+            if (rc.host == "127.0.0.1" || rc.host == "localhost" || rc.host == "::1")
+                self.getLogger().warn("Relay host is localhost: it points to this phone, not another player's server");
             self.getLogger().info("Relay: joining {}:{} as player {} in room '{}'", rc.host, rc.port, rc.playerId, rc.room);
 
-<->start()) {
-                    self.getLogger().error("Could not start voice (see lines above); position link still runs");
-                    mSession->attachRelay(nullptr);
-                    mSession.reset();
-                } else {
-                    self.getLogger().info("Voice chat ready: talk and you'll be heard by players in room '{}' within {} blocks", rc.room, mConfig.radius);
-                }
+            VoiceSessionConfig vc;
+            vc.mixer.radius = static_cast<float>(std::clamp(config.radius, 1, 512));
+            vc.sender.micGainPercent = config.micGainPercent;
+            vc.sender.gateRms = config.micGate;
+            vc.micSource = config.micSource;
+            vc.micInputPreset = config.micInputPreset;
+            vc.selfHearing = config.selfHearing;
+            vc.selfHearingVolume = config.selfHearingVolume;
+            mSession = std::make_unique<VoiceSession>(
+                vc, [this] { return mTracker ? mTracker->snapshot() : PlayerSnapshot{}; },
+                [this](const std::string &msg) { getSelf().getLogger().info("{}", msg); });
+            mRelay = std::make_unique<RelayClient>(
+                rc, [this](const std::string &msg) { getSelf().getLogger().info("{}", msg); },
+                [this](const ForwardedVoice &v) { if (mSession) mSession->onRemoteVoice(v); });
+            mSession->attachRelay(mRelay.get());
+            if (!mSession->start()) {
+                self.getLogger().error("Could not start voice audio (see 'VoiceChat' log lines); relay connection will still be checked");
+                mSession->attachRelay(nullptr);
+                mSession.reset();
+            } else {
+                self.getLogger().info("Voice audio started. Waiting for relay, microphone and player position in room '{}'", rc.room);
             }
             mRelay->start();
             {
@@ -121,32 +178,36 @@ bool VoiceMod::startServices() {
             }
             mRelayThread = std::thread([this] { relayPumpLoop(); });
         }
+    } else if (!config.useRelay) {
+        self.getLogger().info("Multiplayer is off (set useRelay=true and configure the shared relay to talk to others)");
     }
 
+    auto startPermissionWorker = [this, config](VoiceSession *session) {
+        {
+            std::lock_guard<std::mutex> lock(mAudioMu);
+            mAudioStop = false;
+        }
+        // Never block the game/UI thread waiting for an Android permission prompt.
+        mAudioThread = std::thread([this, config, session] { audioStartupLoop(config, session); });
+    };
+
     if (mSession) {
-        // relay voice owns the microphone stream; the self-hearing loopback would fight it for the socket
-    } else if (mConfig.loopbackTest && mConfig.micSource == "launcher") {
-        // The launcher's VoiceCaptureService owns the microphone and permission prompt;
-        // we only listen for its audio stream.
+        if (config.micSource == "direct") startPermissionWorker(mSession.get());
+        // Self-hearing, if enabled, is mixed by this same session; do not open a second mic.
+    } else if (config.selfHearing && sourceOk && config.micSource == "launcher") {
         mSocketLoop = std::make_unique<SocketLoopback>(
             [this](const std::string &msg) { getSelf().getLogger().info("{}", msg); });
-        if (!mSocketLoop->start()) {
+        if (!mSocketLoop->start(config.selfHearingVolume)) {
             self.getLogger().error("Could not start the launcher-mic receiver (see lines above)");
             mSocketLoop.reset();
         } else {
             self.getLogger().info("Waiting for LeviLauncher's voice service (needs a launcher build with voice support)");
         }
-
-        {
-            std::lock_guard<std::mutex> lock(mAudioMu);
-            mAudioStop = false;
-        }
-        // Off the game thread: may have to wait for the user to answer the permission prompt.
-        mAudioThread = std::thread([this] { audioStartupLoop(); });
-    } else {
-        self.getLogger().info("Self Hearing OFF; networked voice not implemented yet (server {}:{}, radius {})",
-                              mConfig.serverHost, mConfig.serverPort, mConfig.radius);
+    } else if (config.selfHearing && sourceOk && config.micSource == "direct") {
+        startPermissionWorker(nullptr); // standalone direct self-hearing test
     }
+    if (config.selfHearing && config.throughResound)
+        self.getLogger().info("Self-hearing uses direct playback; the Resound/game-mixer path is not implemented");
     mServicesUp = true;
     return true;
 }
@@ -158,8 +219,8 @@ void VoiceMod::relayPumpLoop() {
     std::unique_lock<std::mutex> lk(mRelayMu);
     while (!mRelayStop) {
         lk.unlock();
-        if (mTracker && mRelay) {
-            const PlayerSnapshot s = mTracker->snapshot();
+        if (mRelay) {
+            const PlayerSnapshot s = mTracker ? mTracker->snapshot() : PlayerSnapshot{};
             if (s.valid) mRelay->sendPosition(s.dimension, s.x, s.y, s.z, s.yaw);
             if (mSession) mSession->setListener(s);
         }
@@ -174,7 +235,7 @@ void VoiceMod::relayPumpLoop() {
     }
 }
 
-void VoiceMod::audioStartupLoop() {
+void VoiceMod::audioStartupLoop(ModConfig config, VoiceSession *session) {
     auto &log = getSelf().getLogger();
     auto keepWaiting = [this](std::chrono::milliseconds d) {
         std::unique_lock<std::mutex> lk(mAudioMu);
@@ -190,25 +251,24 @@ void VoiceMod::audioStartupLoop() {
             if (i == 0)
                 log.info("Microphone: app={} declared={} granted={}", st.package, st.declared, st.granted);
             if (st.granted) {
-                Loopback::Options opt;
-                opt.inputPreset = mConfig.micInputPreset;
-                opt.micGainDb = mConfig.micGainDb;
-                opt.playbackVolume = mConfig.selfHearingVolume;
-                auto loop = std::make_unique<Loopback>();
-                if (loop->start(opt)) {
-                    mLoopback = std::move(loop);
-                    if (mConfig.throughResound) {
-                        log.info("Self Hearing running (Resound Compatible mode requested, preset={}, micGain={:.1f}dB). "
-                                 "Mixer path not fully wired yet - using direct loopback fallback. "
-                                 "Speak with headphones on.",
-                                 mConfig.micInputPreset, mConfig.micGainDb);
-                    } else {
-                        log.info("Self Hearing running (direct loopback, preset={}, micGain={:.1f}dB). "
-                                 "Speak, you should hear yourself.",
-                                 mConfig.micInputPreset, mConfig.micGainDb);
-                    }
+                if (session) {
+                    if (session->startDirectMic())
+                        log.info("Direct microphone capture running for multiplayer (preset={})", config.micInputPreset);
+                    else
+                        log.error("Microphone is allowed but direct capture failed (see 'VoiceChat' log lines)");
                 } else {
-                    log.error("Microphone is allowed but the audio stream failed to open (see 'VoiceChat' log lines)");
+                    Loopback::Options opt;
+                    opt.inputPreset = config.micInputPreset;
+                    opt.micGainDb = config.micGainDb;
+                    opt.playbackVolume = config.selfHearingVolume;
+                    auto loop = std::make_unique<Loopback>();
+                    if (loop->start(opt)) {
+                        mLoopback = std::move(loop);
+                        log.info("Self Hearing running (direct loopback, preset={}, micGain={:.1f}dB). Use headphones.",
+                                 config.micInputPreset, config.micGainDb);
+                    } else {
+                        log.error("Microphone is allowed but the audio stream failed to open (see 'VoiceChat' log lines)");
+                    }
                 }
                 return;
             }
@@ -217,7 +277,7 @@ void VoiceMod::audioStartupLoop() {
                           "Voice chat needs a launcher build that declares it.", st.package);
                 return;
             }
-            if (mConfig.requestMicPermission && !requested) {
+            if (config.requestMicPermission && !requested) {
                 requested = true;
                 log.info("Requesting microphone permission: {}", requestMicPermission());
             }
@@ -248,6 +308,13 @@ void VoiceMod::stopServices() {
     }
     mRelayCv.notify_all();
     if (mRelayThread.joinable()) mRelayThread.join();
+    {
+        std::lock_guard<std::mutex> lock(mAudioMu);
+        mAudioStop = true;
+    }
+    mAudioCv.notify_all();
+    // The permission worker may be opening this session's direct microphone.
+    if (mAudioThread.joinable()) mAudioThread.join();
     if (mSession) mSession->stop(); // no more mic/send activity after this
     if (mRelay) {
         mRelay->stop();             // no more voice callbacks after this
@@ -257,12 +324,6 @@ void VoiceMod::stopServices() {
         mSession->attachRelay(nullptr);
         mSession.reset();
     }
-    {
-        std::lock_guard<std::mutex> lock(mAudioMu);
-        mAudioStop = true;
-    }
-    mAudioCv.notify_all();
-    if (mAudioThread.joinable()) mAudioThread.join(); // after this nobody else touches mLoopback
     if (mTracker) {
         mTracker->stop();
         mTracker.reset();
@@ -281,6 +342,7 @@ void VoiceMod::stopServices() {
 // ------------------------------------------------------------------ Mod Menu
 
 MenuState VoiceMod::menuState() const {
+    std::lock_guard<std::mutex> lock(mConfigMu);
     MenuState s;
     s.enabled = mConfig.enabled;
     s.useRelay = mConfig.useRelay;
@@ -290,16 +352,19 @@ MenuState VoiceMod::menuState() const {
     return s;
 }
 
-void VoiceMod::saveConfig() {
+void VoiceMod::saveConfigLocked() {
     if (!mConfigFile) return;
     mConfigFile->value() = mConfig;
     if (!mConfigFile->save()) getSelf().getLogger().warn("Could not save config.json");
 }
 
 void VoiceMod::onMenuToggle(bool enabled) {
-    if (mConfig.enabled == enabled) return;
-    mConfig.enabled = enabled;
-    saveConfig();
+    {
+        std::lock_guard<std::mutex> lock(mConfigMu);
+        if (mConfig.enabled == enabled) return;
+        mConfig.enabled = enabled;
+        saveConfigLocked();
+    }
     getSelf().getLogger().info("Voice chat {} from the Mod Menu", enabled ? "ON" : "OFF");
     requestReapply();
 }
@@ -307,26 +372,43 @@ void VoiceMod::onMenuToggle(bool enabled) {
 void VoiceMod::onMenuChanged(std::string_view keyView, std::string_view valueView) {
     const std::string key(keyView), value(valueView);
     bool restart = false;
-    if (key == "useRelay") {
-        const bool v = ModMenuLink::parseBool(value, mConfig.useRelay);
-        restart = v != mConfig.useRelay;
-        mConfig.useRelay = v;
-    } else if (key == "micGainPercent") {
-        mConfig.micGainPercent = ModMenuLink::parseInt(value, mConfig.micGainPercent, 0, 400);
-        std::unique_lock<std::mutex> lock(mSvcMu, std::try_to_lock); // don't stall the UI if services are restarting
-        if (lock.owns_lock() && mSession) mSession->setMicGain(mConfig.micGainPercent);
-    } else if (key == "micGate") {
-        mConfig.micGate = ModMenuLink::parseInt(value, mConfig.micGate, 0, 2000);
-        std::unique_lock<std::mutex> lock(mSvcMu, std::try_to_lock);
-        if (lock.owns_lock() && mSession) mSession->setMicGate(mConfig.micGate);
-    } else if (key == "radius") {
-        mConfig.radius = ModMenuLink::parseInt(value, mConfig.radius, 8, 128);
-        std::unique_lock<std::mutex> lock(mSvcMu, std::try_to_lock);
-        if (lock.owns_lock() && mSession) mSession->setRadius(static_cast<float>(mConfig.radius));
-    } else {
-        return;
+    int setting = 0;
+    {
+        std::lock_guard<std::mutex> lock(mConfigMu);
+        if (key == "useRelay") {
+            const bool v = ModMenuLink::parseBool(value, mConfig.useRelay);
+            restart = v != mConfig.useRelay;
+            mConfig.useRelay = v;
+        } else if (key == "micGainPercent") {
+            setting = mConfig.micGainPercent = ModMenuLink::parseInt(value, mConfig.micGainPercent, 0, 400);
+        } else if (key == "micGate") {
+            setting = mConfig.micGate = ModMenuLink::parseInt(value, mConfig.micGate, 0, 2000);
+        } else if (key == "radius") {
+            setting = mConfig.radius = ModMenuLink::parseInt(value, mConfig.radius, 8, 128);
+        } else {
+            return;
+        }
+        saveConfigLocked();
     }
-    saveConfig();
+    if (key != "useRelay") {
+        std::unique_lock<std::mutex> lock(mSvcMu, std::try_to_lock);
+        if (!lock.owns_lock()) {
+            // A restart already in progress may have taken an older config snapshot.
+            restart = true;
+        } else if (mSession) {
+            // Read the latest value again after taking mSvcMu. Two UI callbacks can
+            // otherwise apply their saved values in the opposite order.
+            {
+                std::lock_guard<std::mutex> configLock(mConfigMu);
+                if (key == "micGainPercent") setting = mConfig.micGainPercent;
+                else if (key == "micGate") setting = mConfig.micGate;
+                else if (key == "radius") setting = mConfig.radius;
+            }
+            if (key == "micGainPercent") mSession->setMicGain(setting);
+            else if (key == "micGate") mSession->setMicGate(setting);
+            else if (key == "radius") mSession->setRadius(static_cast<float>(setting));
+        }
+    }
     getSelf().getLogger().info("Mod Menu: {} = {}", key, value);
     if (restart) requestReapply();
 }
@@ -346,13 +428,19 @@ void VoiceMod::requestReapply() {
             }
             std::lock_guard<std::mutex> g(mSvcMu);
             stopServices();
-            if (mConfig.enabled) startServices();
+            bool enabled;
+            {
+                std::lock_guard<std::mutex> lock(mConfigMu);
+                enabled = mConfig.enabled;
+            }
+            if (enabled) startServices();
         }
     });
 }
 
 bool VoiceMod::unload() {
     getSelf().getLogger().debug("Unloading...");
+    std::lock_guard<std::mutex> lock(mConfigMu);
     mConfigFile.reset();
     return true;
 }

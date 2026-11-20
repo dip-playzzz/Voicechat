@@ -22,6 +22,7 @@ NOTE: voice and positions are NOT encrypted yet; the secret never crosses the wi
 """
 import hashlib
 import hmac
+import math
 import struct
 
 MAGIC = b"VC"
@@ -85,15 +86,21 @@ def parse(data):
                 return None
             return t, dict(player_id=pid, room=room, ts=ts, nonce=nonce, mac=mac)
         if t == POS:
+            if len(data) != o + POS_BODY.size:
+                return None
             s, dim, x, y, z, yaw = POS_BODY.unpack_from(data, o)
+            if not all(math.isfinite(v) for v in (x, y, z, yaw)):
+                return None
             return t, dict(session=s, dim=dim, pos=(x, y, z), yaw=yaw)
         if t == VOICE:
             s, seq, dim, x, y, z, yaw = VOICE_HEAD.unpack_from(data, o); o += VOICE_HEAD.size
             (n,) = struct.unpack_from("<H", data, o); o += 2
-            if o + n != len(data):
+            if not 0 < n <= 400 or o + n != len(data) or not all(math.isfinite(v) for v in (x, y, z, yaw)):
                 return None
             return t, dict(session=s, seq=seq, dim=dim, pos=(x, y, z), yaw=yaw, opus=data[o:o + n])
         if t in (PING, BYE):
+            if len(data) != o + 8:
+                return None
             (s,) = struct.unpack_from("<Q", data, o)
             return t, dict(session=s)
     except (struct.error, UnicodeDecodeError, IndexError):

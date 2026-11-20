@@ -4,18 +4,28 @@
 
 #include <algorithm>
 #include <charconv>
+#include <condition_variable>
 #include <fstream>
 
 namespace voicechat {
 
-// The launcher may invoke our callbacks from its UI thread at any moment, including just after we asked it
-// to unregister. Callbacks therefore only touch this object (kept alive by the shared_ptr they hold) and
-// check `active` under a lock; disconnect() clears the handlers and flips `active` first.
+// The launcher may invoke a copied callback during shutdown. Keep its state alive,
+// and wait for handlers that have already begun before the owning mod is stopped.
 struct ModMenuLink::Shared {
     std::mutex mu;
+    std::condition_variable idle;
     bool active = true;
+    std::size_t inFlight = 0;
     ToggleFn onToggle;
     ChangeFn onChange;
+
+    struct Finish {
+        Shared &s;
+        ~Finish() {
+            std::lock_guard<std::mutex> lock(s.mu);
+            if (--s.inFlight == 0) s.idle.notify_all();
+        }
+    };
 };
 
 namespace {
@@ -106,12 +116,14 @@ bool ModMenuLink::connectWith(RegisterFn reg, UnregisterFn unreg, std::string_vi
     m.configs.push_back({"radius", "Voice radius (blocks)", pl::modmenu::ConfigType::SliderInt, text(state.radius), "8", "128", ""});
     m.onToggle = [shared](std::string_view, bool enabled) {
         ToggleFn f;
-        { std::lock_guard<std::mutex> lock(shared->mu); if (!shared->active) return; f = shared->onToggle; }
+        { std::lock_guard<std::mutex> lock(shared->mu); if (!shared->active) return; f = shared->onToggle; ++shared->inFlight; }
+        Shared::Finish finish{*shared};
         if (f) f(enabled);
     };
     m.onConfigChanged = [shared](std::string_view, std::string_view key, std::string_view value) {
         ChangeFn f;
-        { std::lock_guard<std::mutex> lock(shared->mu); if (!shared->active) return; f = shared->onChange; }
+        { std::lock_guard<std::mutex> lock(shared->mu); if (!shared->active) return; f = shared->onChange; ++shared->inFlight; }
+        Shared::Finish finish{*shared};
         if (f) f(key, value);
     };
     m.onKeybind = [](std::string_view, std::string_view, bool) {};
@@ -130,10 +142,11 @@ bool ModMenuLink::connectWith(RegisterFn reg, UnregisterFn unreg, std::string_vi
 
 void ModMenuLink::disconnect() {
     if (shared_) {
-        std::lock_guard<std::mutex> lock(shared_->mu);
-        shared_->active = false; // callbacks already in flight become no-ops
+        std::unique_lock<std::mutex> lock(shared_->mu);
+        shared_->active = false;
         shared_->onToggle = nullptr;
         shared_->onChange = nullptr;
+        shared_->idle.wait(lock, [this] { return shared_->inFlight == 0; });
     }
     if (registered_ && unreg_) unreg_(kModuleId);
     registered_ = false;

@@ -13,6 +13,8 @@ Proximity Voice Chat mod**, through the same relay.
 4. Edit `plugins/VoiceChatBridge/config.yml`:
    `relay.host/port` (your relay), `relay.room` (same as the Bedrock players), `relay.secret`, `radius` (same as the relay's `--radius`).
 5. Start the relay with room capacity for everyone: `python3 relay/server.py --secret ... --max-room 100`.
+   If Simple Voice Chat already uses UDP 24454 on the same host, run the relay on a different UDP port
+   (e.g. `--port 24455`) and set that port in the bridge and every Bedrock mod config.
 6. Start the server. Log: `Voice bridge ready: ...`, then `Relay: connected ...` for each Java player who joins voice chat.
 
 ## What it does and does not do

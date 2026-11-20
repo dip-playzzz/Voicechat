@@ -19,7 +19,7 @@ namespace bedrocktools::api { struct ApiV1; }
 namespace voicechat {
 
 struct PlayerSnapshot {
-    bool valid = false; // false until the first tick has been seen
+    bool valid = false; // false before the first tick and after the player stops ticking
     float x = 0, y = 0, z = 0;
     float pitch = 0, yaw = 0; // degrees, Minecraft convention (yaw 0 = facing +Z)
     int dimension = 0;        // 0 overworld, 1 nether, 2 end

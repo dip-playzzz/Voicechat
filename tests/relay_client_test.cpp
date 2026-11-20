@@ -28,8 +28,8 @@ struct Peer {
     RelayClient client;
     std::mutex mu;
     std::vector<ForwardedVoice> heard;
-    Peer(std::uint32_t id, int port, const std::string &secret, const char *name)
-        : client({"127.0.0.1", static_cast<std::uint16_t>(port), "room1", secret, id},
+    Peer(std::uint32_t id, int port, const std::string &secret, const char *name, const char *host = "127.0.0.1")
+        : client({host, static_cast<std::uint16_t>(port), "room1", secret, id},
                  [name](const std::string &m) { std::printf("  [%s] %s\n", name, m.c_str()); },
                  [this](const ForwardedVoice &v) { std::lock_guard<std::mutex> l(mu); heard.push_back(v); }) {}
     size_t count() { std::lock_guard<std::mutex> l(mu); return heard.size(); }
@@ -54,7 +54,8 @@ int main(int argc, char **argv) {
       CHECK(hex(d.data(), 32) == "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8", "hmac-sha256"); }
     { std::string longKey(100, 'k'); auto d = hmacSha256(longKey, "x"); CHECK(d.size() == 32, "hmac long key"); }
 
-    Peer A(1, port, secret, "A"), B(2, port, secret, "B"), C(3, port, secret, "C"), D(4, port, "WRONG", "D");
+    // localhost commonly resolves to IPv6 first, while the bundled relay listens on IPv4.
+    Peer A(1, port, secret, "A", "localhost"), B(2, port, secret, "B"), C(3, port, secret, "C"), D(4, port, "WRONG", "D");
     A.client.start(); B.client.start(); C.client.start(); D.client.start();
 
     CHECK(waitFor([&] { return A.client.connected() && B.client.connected() && C.client.connected(); }, 5s),

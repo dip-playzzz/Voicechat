@@ -77,6 +77,7 @@ class RelayClient {
 
     std::string lastNoteKey_; // worker thread only
     std::int64_t lastNoteAt_ = 0;
+    std::size_t nextAddress_ = 0, currentAddress_ = 0; // worker-only DNS retry state
 };
 
 } // namespace voicechat

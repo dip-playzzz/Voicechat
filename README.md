@@ -1,117 +1,104 @@
-# Proximity Voice Chat (LeviLauncher Android mod)
+# Proximity Voice Chat for LeviLauncher
 
-Built on the LeviLauncher mod template (preloader-android 0.2.2).
+An Android LeviLauncher mod for **proximity voice chat** in Minecraft Bedrock. Each player runs the mod; a separate UDP relay connects them and forwards Opus audio to other players in the same room, dimension and radius. A Java Simple Voice Chat bridge is available separately in [`bridge/`](bridge/README.md).
 
-## Status
-- [x] **Self Hearing** (default ON) – hear your own voice; Resound Compatible preference via `throughResound`
-- [x] Mic -> Opus -> speaker loopback (`src/voice/Loopback.*`), driven by `selfHearing` (legacy: `loopbackTest`)
-- [ ] True FMOD / world-mixer path so Resound reverb lands on self-hearing (falls back to direct loopback for now)
-- [ ] UDP client talking to the relay server (`voicechat/server.py`, protocol in `protocol.py` / `packet.h`)
-- [ ] Jitter buffer
-- [x] Player position / yaw / dimension via BedrockTools' event API (`src/voice/PlayerTracker.*`)
-- [x] Distance falloff + stereo pan math (`src/voice/Proximity.h`, host-tested: `tests/proximity_test.cpp`)
+## Why it wasn't working
 
-### Self Hearing / Resound Compatible (config)
-| Key | Default | Meaning |
-|-----|---------|---------|
-| `selfHearing` | `true` | Hear your own voice |
-| `throughResound` | `true` | Prefer routing through the game mixer (Resound FX) |
-| `selfHearingVolume` | `1.0` | 0.0–2.0 linear gain (1.0 = 100%) |
+The previous revision had a damaged section in `src/mod/VoiceMod.cpp`, so the Android mod could not compile and the relay/voice session was never created. Multiplayer also needs configuration: **`useRelay` defaults to `false`**, the default host `127.0.0.1` points back to the phone itself, and the default room secret is empty. Hearing yourself is only a microphone test; it does not connect you to other players.
+
+This revision connects the multiplayer voice pipeline, supports both launcher and direct microphones, and tests the actual mod startup with simulated Android audio. **It has not yet been tested on real phones**, so an on-device test is still needed.
+
+## What every player needs
+
+- LeviLauncher and this mod installed/enabled on each Android device.
+- **BedrockTools 1.5.12**, enabled alongside the mod, and a matching Minecraft version. The vendored offsets target **Minecraft 1.26.60–1.26.69**; other versions disable position tracking by default to avoid crashes. Without a current position, voice is not sent or played.
+- A launcher that declares Android's `RECORD_AUDIO` permission, with microphone permission granted to **LeviLauncher**, not the separate Minecraft app.
+- Everyone must join the same Minecraft world/server and configure the same reachable voice relay, port, room and secret. The relay room is **not automatically linked** to a Minecraft server: use a distinct room for each world.
+- Headphones are recommended to avoid microphone feedback, especially if self-hearing is enabled.
+
+## Multiplayer setup
+
+### 1. Start a relay
+
+Run one relay on a computer/VPS reachable by every phone. Python 3.8+ is required; there are no Python package dependencies.
+
+```sh
+# Generate a long random secret and share it with your players privately.
+python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+# Set VC_SECRET to that generated value in your server environment, then:
+python3 relay/server.py --port 24454 --radius 32 --max-room 32
+```
+
+Open/forward **UDP port 24454** on the relay's firewall/router. For internet play use a public server IP/domain or a UDP tunnel; a home server behind CGNAT may not be reachable. For LAN play use the host computer's LAN IP, not `127.0.0.1`. Only the relay needs a reachable UDP port; players make outgoing connections. See [`relay/README.md`](relay/README.md) for more options.
+
+### 2. Configure each player's mod
+
+Edit the mod's `config/config.json` on each device (the file is generated in the mod directory). Set or change these fields, replacing the example values:
+
+```json
+{
+  "enabled": true,
+  "useRelay": true,
+  "serverHost": "YOUR_RELAY_IP_OR_DOMAIN",
+  "serverPort": 24454,
+  "room": "my-world",
+  "secret": "THE_SAME_GENERATED_SECRET",
+  "playerId": 0,
+  "radius": 32,
+  "micSource": "launcher",
+  "selfHearing": false
+}
+```
+
+Keep the other generated settings. `playerId: 0` chooses a random ID; if assigning IDs manually, every player in a room must use a different positive ID. Use the same `radius` as the relay: the relay limits delivery, and each client also applies its own distance falloff. The relay defaults to 32 players per room and the client mixes up to 16 simultaneous speakers.
+
+`micSource` can be:
+
+- **`launcher`** (default): receive 16 kHz mono audio from a LeviLauncher build with its `VoiceCaptureService`. The mod listens on `@org.levimc.voicechatlevi.audio` and accepts only the same app UID. A launcher without this service will wait indefinitely for it.
+- **`direct`**: open the microphone with Oboe after LeviLauncher has microphone permission. This can be useful when the launcher does not provide the service. If the launcher is already using the mic, stop its capture service or use `launcher` instead.
+
+Restart the mod/game after editing text fields. The Mod Menu card can also toggle the mod/relay and adjust mic gain, gate and radius. All players need to be in a supported world for positions to update; then speak near one another.
+
+## Self-hearing and settings
+
+`selfHearing` defaults to `true`; set it to `false` to hear only other players. If enabled during multiplayer, the same mic stream is mixed locally rather than opening a second microphone. `selfHearingVolume` is a linear 0.0–2.0 gain. `throughResound` is a preference only: the game-mixer/Resound effects path is not implemented, so self-hearing uses direct playback. Old configs without `selfHearing` inherit their `loopbackTest` value once; after migration, `selfHearing` controls playback.
+
+For multiplayer, adjust `micGainPercent` (100 = unchanged) and `micGate` (0 = always send). Lower the gate if quiet speech is cut off. `micInputPreset` selects the direct Android input mode; `micGainDb` applies only to the standalone direct self-hearing test.
+
+## Troubleshooting
+
+Check logcat for the `VoiceChat` tag and the mod logger:
+
+- **No `Relay: connected`**: check `useRelay`, `serverHost`, UDP port/firewall and that the relay is running. A phone's `127.0.0.1` is not another player's computer. A DNS name with multiple addresses is retried if one is unreachable.
+- **Wrong room secret / clock error**: all players need the exact same secret and room; set their device clocks correctly.
+- **Waiting for LeviLauncher's voice service**: use a launcher with the service, or try `micSource: "direct"`. For direct mode grant microphone permission to LeviLauncher in Android settings; some launchers do not declare it at all.
+- **No player position**: join a world, enable the matching BedrockTools release and use a supported Minecraft version. A stale position is dropped after ticks stop; the relay also stops delivering to stale listeners.
+- **Connected but silent**: check mic level and relay packet counts in the 10-second status line, lower `micGate`, and check both players' room, dimension and distance. The relay radius and each client's radius both limit audio.
+- **Only hear yourself**: self-hearing is a local test. Enable/configure the relay on every player.
 
 ## Build
-Push to GitHub and let the Actions workflow build the `.levipack` (artifact: `voicechat-levipack`),
-or locally with Android SDK + NDK 28.2.13676358, CMake, Ninja and PowerShell:
 
-    ./scripts/package.ps1 -Abi arm64-v8a
+The GitHub Actions **Build** workflow produces the `voicechat-levipack` artifact. Import the `.levipack` in LeviLauncher's mod manager and enable it. Locally, Android SDK + NDK 28.2.13676358, CMake, Ninja and PowerShell are needed:
 
-Import the resulting `.levipack` in LeviLauncher's mod manager and enable it.
+```powershell
+./scripts/package.ps1 -Abi arm64-v8a
+```
 
-## Testing the loopback
-1. Grant Minecraft the microphone permission in Android settings.
-2. Wear headphones, launch the game, speak.
-3. Check logcat for the `VoiceChat` tag and the mod logger lines
-   ("Loopback running" or "Loopback failed to start").
+The workflow runs on a push to `main`, on a pull request, or manually from Actions. A failed compiler/package command now fails the workflow instead of silently continuing.
 
-## Requires BedrockTools
-Position comes from BedrockTools' public event API (MIT; SDK headers vendored in `third_party/bedrocktools`).
-Import and enable **BedrockTools** (tested against 1.5.10, built for Minecraft `1.26.60.X`) alongside this mod.
-If it isn't loaded, this mod logs a warning and keeps retrying. If BedrockTools' offsets don't match your
-Minecraft version, the position values will be wrong or crash, so use the matching BedrockTools release.
+## Host tests
 
-Expected log line every 5 s once in a world:
-`player pos=(x, y, z) yaw=... dim=0`
+On Linux, install `g++`, Python 3, CMake and Opus (e.g. `libopus-dev`). The following also compiles the real mod lifecycle against the real preloader headers and runs a simulated-device test of both microphone paths against the real relay:
 
-## Host-side tests (run on a PC, no Android needed)
-    g++ -std=c++20 -Isrc tests/proximity_test.cpp -o proximity_test && ./proximity_test
-    g++ -std=c++20 -DVOICECHAT_TEST -g -O1 -fsanitize=address,undefined -Isrc \
-        -Ithird_party/bedrocktools/include tests/tracker_lifetime_test.cpp \
-        src/voice/PlayerTracker.cpp -pthread -o lifetime_test && ./lifetime_test 3000
+```sh
+cmake -S . -B build-host -DVOICECHAT_BUILD_HOST_INTEGRATION=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+cmake --build build-host --target voicechat_mod_compile_check voicechat_mod_integration_test -j 2
+PRELOADER_INC="$PWD/build-host/_deps/preloader_android-src/include" sh tests/run_host_tests.sh
+python3 tests/voice_mod_integration.py build-host/voicechat_mod_integration_test
+```
 
-`tracker_lifetime_test` publishes player ticks on one thread while another repeatedly attaches,
-stops and destroys the tracker. The previous implementation fails it with a heap-use-after-free.
+The tests include multiple simultaneous speakers, room/dimension/distance isolation, stale positions, relay reconnects, and the launcher/direct input paths. Android permission, Oboe hardware, actual Bedrock memory offsets and the Java bridge still require real-device/server testing.
 
-## Microphone permission
-The mod runs inside the LeviLauncher app, so the microphone permission belongs to LeviLauncher
-(`org.levimc.launcher`), not Minecraft. On startup the mod logs
-`Microphone: app=... declared=... granted=...`:
-- `granted=true`   -> audio starts.
-- `declared=false` -> LeviLauncher's manifest has no RECORD_AUDIO, so Android can't grant it.
-- `granted=false`  -> the mod asks Android to show the prompt (config `requestMicPermission`);
-                      you can also allow it in Settings > Apps > LeviLauncher > Permissions.
+## Privacy
 
-## Launcher microphone service (`micSource = "launcher"`, default)
-Newer LeviLauncher builds with voice support capture the microphone themselves
-(`org.levimc.launcher.voice.VoiceCaptureService`) and stream it to the mod:
-- The mod listens on the abstract unix socket `@org.levimc.voicechatlevi.audio`; the service connects.
-- Data: raw PCM, 16-bit signed, mono, 16 kHz, no header (640-byte / 20 ms writes).
-- The mod never writes to the socket (a reply starting with "VCLS" would make the service stand down).
-- Only connections from our own app UID are accepted.
-Expected log lines: `listening for the launcher microphone stream`, `launcher connected`, then every 5 s
-`mic stream: 250 frames in 5 s, peak -23 dBFS`.
-Host test: `g++ -std=c++20 -g -O1 -fsanitize=address,undefined -Isrc tests/mic_socket_test.cpp src/voice/MicSocketSource.cpp -pthread -o ms && ./ms`
-
-## Crash fix (Minecraft 1.26.52)
-A crash dump from a 1.26.52 device showed a SIGSEGV inside the position-reading code: the vendored
-BedrockTools SDK reads Player memory at offsets made for 1.26.60.*, and on another build the loaded
-pointer was garbage. Now (1) position tracking only starts on 1.26.60.* (version taken from the mod's
-folder name; override with `allowUnsupportedVersion`), and (2) every game-memory read goes through
-`safeRead()` (kernel-checked copy) and a plausibility filter, so a bad offset skips the sample instead of
-crashing. Tests: `tests/safety_test.cpp`.
-
-## Internet relay (different networks)
-See `relay/README.md`. `useRelay=true` makes the mod join the relay and send the player's position;
-it logs connection status. Audio is not yet routed through it (next step).
-Tests: `relay/test_server.py`, `tests/relay_integration.py` (C++ client against the real server).
-
-
-## Voice chat (simple proximity voice over the internet relay)
-Targets **BedrockTools 1.5.12 / Minecraft 1.26.6X.X** (1.26.60 - 1.26.69; other versions skip position tracking
-so they can't crash the game).
-
-Data flow:
-    LeviLauncher mic service -> gate + Opus (20 kbps) -> relay (with your position) -> nearby players
-    relay -> jitter buffer -> Opus decode (lost frames concealed) -> distance volume + left/right pan -> speaker
-
-Settings (mod config): `useRelay=true`, `serverHost`, `serverPort`, `room`, `secret`, `micSource="launcher"`,
-`radius` (blocks), `micGainPercent`, `micGate`. See `relay/README.md` to run the server.
-Everyone in a room needs the same `secret`; the server decides who is within `radius`.
-
-Status lines in the log (every 10 s): `Relay: connected | voice packets heard ... | mic connected, voice frames
-sent N (speaking), speakers heard now M`.
-
-Needs: a LeviLauncher build with the microphone service (it declares RECORD_AUDIO), BedrockTools 1.5.12 enabled
-(for the position), headphones recommended. Not encrypted; not yet tested on a phone.
-
-Run every PC-side test: `sh tests/run_host_tests.sh` (needs g++, python3, libopus.so.0).
-
-## Java Simple Voice Chat players (bridge)
-`bridge/` is a Paper plugin that connects Simple Voice Chat players to the same relay, so Java SVC players and Bedrock
-mod players can hear each other by proximity. See `bridge/README.md`. Built by its own workflow (`bridge.yml`).
-
-## Mod Menu card
-On start the mod registers a **Proximity Voice Chat** card in LeviLauncher's Mod Menu: an on/off switch, "Use internet
-relay", microphone gain, voice gate and voice radius. Changes are saved to config.json; gain, gate and radius apply
-immediately, the on/off switch and the relay switch restart the voice services (on a background thread).
-Room and secret are text, so they stay in config.json. Log line: `Mod Menu: 'Proximity Voice Chat' card registered`,
-or `No Mod Menu card (<reason>)` if the launcher has none. Tested on a PC against stand-ins for an older and a newer
-launcher layout (`tests/modmenu_test.cpp`); not yet seen on a phone.
+The room secret authenticates clients, but **voice and positions are not encrypted**. Anyone on the network path or running the relay may be able to hear them. The relay trusts client-reported positions and does not verify Minecraft identity or world membership. Use a relay and room members you trust; do not treat this as private communication.
