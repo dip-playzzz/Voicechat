@@ -2,6 +2,7 @@
 // One voice-chat session on the phone:
 //   launcher or direct mic -> VoiceSender (gate + Opus) -> relay (+ player position)
 //   relay -> RemoteVoices (jitter, decode, distance + pan) -> stereo speaker
+#include "voice/AudioDefaults.h"
 #include "voice/PlayerTracker.h"
 #include "voice/RelayClient.h"
 #include "voice/RemoteVoices.h"
@@ -20,8 +21,13 @@ struct VoiceSessionConfig {
     std::string micSource = "launcher"; // launcher service, or direct Oboe capture
     std::string micInputPreset = "voice_recognition";
     std::string micSocketName = "org.levimc.voicechatlevi.audio";
-    bool selfHearing = true;
-    float selfHearingVolume = 1.0f;
+    bool selfHearing = audio_defaults::selfHearing;
+    float selfHearingVolume = audio_defaults::selfHearingVolume;
+    // Off by default: the echo reference contains this mod's output only,
+    // never the Minecraft game mix. These are not feedback-safety guarantees.
+    bool webrtcVoiceAec = false;
+    bool webrtcNoiseSuppression = false;
+    int webrtcAecDelayMs = 50; // rough estimate; actual hardware latency is unknown
 };
 
 class VoiceSession {

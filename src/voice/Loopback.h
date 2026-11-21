@@ -2,6 +2,8 @@
 #include <memory>
 #include <string>
 
+#include "voice/AudioDefaults.h"
+
 namespace voicechat {
 
 // Mic -> Opus encode -> Opus decode -> speaker.
@@ -15,9 +17,9 @@ class Loopback {
         // voice_communication often kills speech on some OEMs while keeping noise.
         std::string inputPreset = "voice_recognition";
         // Applied to mic samples before Opus encode (dB).
-        float micGainDb = 6.0f;
+        float micGainDb = audio_defaults::selfHearingMicGainDb;
         // Playback gain for self-hearing (linear 0..2).
-        float playbackVolume = 1.0f;
+        float playbackVolume = audio_defaults::selfHearingVolume;
     };
 
     Loopback();

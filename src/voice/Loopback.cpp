@@ -7,6 +7,7 @@
 #include <oboe/Oboe.h>
 #include <opus.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstring>
@@ -70,7 +71,7 @@ struct Loopback::Impl : oboe::AudioStreamDataCallback {
     OpusDecoder *dec = nullptr;
     SpscRing<int16_t> playback{kRate}; // ~1 s of decoded audio
     std::vector<int16_t> pending;      // mic samples waiting to fill a frame
-    std::atomic<float> volume{1.0f};   // Self Hearing playback gain (linear)
+    std::atomic<float> volume{0.0f};   // Self Hearing playback gain (linear)
     std::atomic<float> micGain{1.0f};  // Pre-encode mic gain (linear)
     oboe::InputPreset inputPreset = oboe::InputPreset::VoiceRecognition;
 
@@ -159,14 +160,15 @@ bool Loopback::start() {
 
 bool Loopback::start(const Options &options) {
     d_->inputPreset = parsePreset(options.inputPreset);
-    d_->micGain.store(dbToLinear(options.micGainDb), std::memory_order_relaxed);
-    d_->volume.store(options.playbackVolume < 0.f   ? 0.f
-                     : options.playbackVolume > 2.f ? 2.f
-                                                    : options.playbackVolume,
-                     std::memory_order_relaxed);
+    // A malformed or extreme gain should not turn microphone monitoring into an
+    // unbounded boost. Invalid playback volumes fail silent, never at full volume.
+    const float gainDb = std::isfinite(options.micGainDb) ? std::clamp(options.micGainDb, -60.f, 12.f) : 0.f;
+    const float volume = std::isfinite(options.playbackVolume) ? std::clamp(options.playbackVolume, 0.f, 2.f) : 0.f;
+    d_->micGain.store(dbToLinear(gainDb), std::memory_order_relaxed);
+    d_->volume.store(volume, std::memory_order_relaxed);
 
     LOGI("Self Hearing capture: preset=%s micGain=%.1fdB playback=%.0f%%",
-         presetName(d_->inputPreset), options.micGainDb, options.playbackVolume * 100.f);
+         presetName(d_->inputPreset), gainDb, volume * 100.f);
 
     int err = 0;
     d_->enc = opus_encoder_create(kRate, 1, OPUS_APPLICATION_VOIP, &err);
@@ -215,11 +217,8 @@ void Loopback::stop() {
 }
 
 void Loopback::setVolume(float linear) {
-    if (linear < 0.f)
-        linear = 0.f;
-    if (linear > 2.f)
-        linear = 2.f;
-    d_->volume.store(linear, std::memory_order_relaxed);
+    d_->volume.store(std::isfinite(linear) ? std::clamp(linear, 0.f, 2.f) : 0.f,
+                     std::memory_order_relaxed);
 }
 
 float Loopback::volume() const { return d_->volume.load(std::memory_order_relaxed); }

@@ -51,6 +51,13 @@ FetchContent_MakeAvailable(preloader_android nlohmann_json boost_pfr magic_enum 
 FetchContent_GetProperties(preloader_android)
 set(LEVI_PRELOADER_INCLUDE_DIR "${preloader_android_SOURCE_DIR}/include")
 
+option(VOICECHAT_BUILD_HOST_INTEGRATION "Build the simulated-device multiplayer integration test" OFF)
+option(VOICECHAT_ENABLE_WEBRTC "Build WebRTC audio processing into the multiplayer voice path" ON)
+# The host config generator alone does not need audio or Meson.
+if(VOICECHAT_ENABLE_WEBRTC AND (ANDROID OR VOICECHAT_BUILD_HOST_INTEGRATION))
+    include(cmake/WebRtcAudioProcessing.cmake)
+endif()
+
 if(NOT ANDROID)
     set(LEVI_GENERATED_CONFIG_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated-config")
 
@@ -89,7 +96,6 @@ if(NOT ANDROID)
     target_link_libraries(voicechat_mod_compile_check PRIVATE
         nlohmann_json::nlohmann_json Boost::pfr magic_enum::magic_enum fmt::fmt)
 
-    option(VOICECHAT_BUILD_HOST_INTEGRATION "Build the simulated-device multiplayer integration test" OFF)
     if(VOICECHAT_BUILD_HOST_INTEGRATION)
         find_package(Threads REQUIRED)
         find_library(OPUS_TEST_LIBRARY NAMES opus libopus.so.0 REQUIRED)
@@ -98,7 +104,7 @@ if(NOT ANDROID)
             src/mod/Config.cpp src/mod/VoiceMod.cpp src/mod/ModMenuLink.cpp
             src/voice/Loopback.cpp src/voice/PlayerTracker.cpp src/voice/MicSocketSource.cpp
             src/voice/SocketLoopback.cpp src/voice/RelayClient.cpp src/voice/VoiceSender.cpp
-            src/voice/RemoteVoices.cpp src/voice/VoiceSession.cpp)
+            src/voice/RemoteVoices.cpp src/voice/VoiceSession.cpp src/voice/WebRtcProcessor.cpp)
         target_compile_definitions(voicechat_mod_integration_test PRIVATE VOICECHAT_TEST)
         target_include_directories(voicechat_mod_integration_test PRIVATE
             tests/host_stubs tests/host_opus src "${LEVI_PRELOADER_INCLUDE_DIR}"
@@ -106,6 +112,12 @@ if(NOT ANDROID)
         target_link_libraries(voicechat_mod_integration_test PRIVATE
             nlohmann_json::nlohmann_json Boost::pfr magic_enum::magic_enum fmt::fmt
             Threads::Threads "${OPUS_TEST_LIBRARY}" ${CMAKE_DL_LIBS})
+        if(TARGET voicechat_webrtc)
+            target_link_libraries(voicechat_mod_integration_test PRIVATE voicechat_webrtc)
+            add_executable(voicechat_webrtc_test tests/webrtc_apm_test.cpp src/voice/WebRtcProcessor.cpp)
+            target_include_directories(voicechat_webrtc_test PRIVATE src)
+            target_link_libraries(voicechat_webrtc_test PRIVATE voicechat_webrtc Threads::Threads)
+        endif()
         # PlayerTracker finds the simulated BedrockTools_GetApi with dlsym.
         set_target_properties(voicechat_mod_integration_test PROPERTIES ENABLE_EXPORTS ON)
     endif()
@@ -171,6 +183,7 @@ add_library(${MOD_LIBRARY_NAME} SHARED
     src/voice/VoiceSender.cpp
     src/voice/RemoteVoices.cpp
     src/voice/VoiceSession.cpp
+    src/voice/WebRtcProcessor.cpp
 )
 
 set_target_properties(${MOD_LIBRARY_NAME} PROPERTIES
@@ -205,6 +218,12 @@ target_link_libraries(${MOD_LIBRARY_NAME} PRIVATE
     oboe
     opus
 )
+if(TARGET voicechat_webrtc)
+    target_link_libraries(${MOD_LIBRARY_NAME} PRIVATE voicechat_webrtc)
+    # Avoid exporting statically linked WebRTC/Abseil symbols into Minecraft or
+    # other mods that may load a different version of the same libraries.
+    target_link_options(${MOD_LIBRARY_NAME} PRIVATE "-Wl,--exclude-libs,ALL")
+endif()
 
 if(TARGET preloader)
     target_link_libraries(${MOD_LIBRARY_NAME} PRIVATE preloader)
@@ -235,6 +254,22 @@ set(LEVI_PACKAGE_FILE "${CMAKE_CURRENT_BINARY_DIR}/${MOD_ID}-${MOD_VERSION}-${CM
 set(LEVI_PACKAGE_ICON_COMMAND)
 set(LEVI_PACKAGE_CONFIG_COMMAND
     COMMAND "${CMAKE_COMMAND}" -E copy_directory "${LEVI_PACKAGE_CONFIG_DIR}" "${LEVI_PACKAGE_MOD_DIR}/config")
+set(LEVI_PACKAGE_LICENSE_COMMAND)
+if(TARGET voicechat_webrtc)
+    set(_notices "${LEVI_PACKAGE_MOD_DIR}/licenses/webrtc")
+    list(APPEND LEVI_PACKAGE_LICENSE_COMMAND
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${_notices}"
+        COMMAND "${CMAKE_COMMAND}" -E copy "${VOICECHAT_WEBRTC_SOURCE_DIR}/COPYING" "${_notices}/COPYING"
+        COMMAND "${CMAKE_COMMAND}" -E copy "${VOICECHAT_WEBRTC_SOURCE_DIR}/AUTHORS" "${_notices}/AUTHORS"
+        COMMAND "${CMAKE_COMMAND}" -E copy "${VOICECHAT_WEBRTC_SOURCE_DIR}/webrtc/LICENSE" "${_notices}/LICENSE"
+        COMMAND "${CMAKE_COMMAND}" -E copy "${VOICECHAT_WEBRTC_SOURCE_DIR}/webrtc/PATENTS" "${_notices}/PATENTS"
+        COMMAND "${CMAKE_COMMAND}" -E copy "${VOICECHAT_WEBRTC_SOURCE_DIR}/webrtc/common_audio/third_party/ooura/LICENSE" "${_notices}/ooura-LICENSE"
+        COMMAND "${CMAKE_COMMAND}" -E copy "${VOICECHAT_WEBRTC_SOURCE_DIR}/webrtc/common_audio/third_party/spl_sqrt_floor/LICENSE" "${_notices}/spl-sqrt-LICENSE"
+        COMMAND "${CMAKE_COMMAND}" -E copy "${VOICECHAT_WEBRTC_SOURCE_DIR}/webrtc/modules/third_party/fft/LICENSE" "${_notices}/fft-LICENSE"
+        COMMAND "${CMAKE_COMMAND}" -E copy "${VOICECHAT_WEBRTC_SOURCE_DIR}/webrtc/third_party/pffft/LICENSE" "${_notices}/pffft-LICENSE"
+        COMMAND "${CMAKE_COMMAND}" -E copy "${VOICECHAT_WEBRTC_SOURCE_DIR}/webrtc/third_party/rnnoise/COPYING" "${_notices}/rnnoise-COPYING"
+        COMMAND "${CMAKE_COMMAND}" -E copy "${VOICECHAT_ABSEIL_SOURCE_DIR}/LICENSE" "${_notices}/abseil-LICENSE")
+endif()
 
 if(NOT MOD_ICON STREQUAL "")
     if(IS_ABSOLUTE "${MOD_ICON}")
@@ -266,6 +301,7 @@ add_custom_target(levi_package
     COMMAND "${CMAKE_COMMAND}" -E copy "${CMAKE_CURRENT_BINARY_DIR}/manifest.json" "${LEVI_PACKAGE_MOD_DIR}/manifest.json"
     ${LEVI_PACKAGE_ICON_COMMAND}
     ${LEVI_PACKAGE_CONFIG_COMMAND}
+    ${LEVI_PACKAGE_LICENSE_COMMAND}
     COMMAND "${CMAKE_COMMAND}" -E chdir "${LEVI_PACKAGE_ROOT}" "${CMAKE_COMMAND}" -E tar "cf" "${LEVI_PACKAGE_FILE}" --format=zip "${MOD_ID}"
     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
     DEPENDS ${MOD_LIBRARY_NAME}

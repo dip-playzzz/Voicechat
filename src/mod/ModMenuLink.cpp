@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cmath>
 #include <condition_variable>
 #include <fstream>
 
@@ -65,13 +66,21 @@ bool ModMenuLink::parseBool(std::string_view v, bool fallback) {
 
 int ModMenuLink::parseInt(std::string_view v, int fallback, int lo, int hi) {
     int out = fallback;
-    if (auto [p, ec] = std::from_chars(v.data(), v.data() + v.size(), out); ec != std::errc()) {
-        // sliders may send "150.0": accept a decimal and drop the fraction
-        double d = 0;
-        try { d = std::stod(std::string(v)); } catch (...) { return fallback; }
-        out = static_cast<int>(d);
+    const auto [p, ec] = std::from_chars(v.data(), v.data() + v.size(), out);
+    if (ec == std::errc() && p == v.data() + v.size()) return std::clamp(out, lo, hi);
+
+    // Sliders may send "150.0". Reject trailing junk and non-finite values,
+    // and clamp before converting: casting a huge double or NaN to int is UB.
+    try {
+        std::size_t used = 0;
+        const double d = std::stod(std::string(v), &used);
+        if (used != v.size() || !std::isfinite(d)) return fallback;
+        if (d <= lo) return lo;
+        if (d >= hi) return hi;
+        return static_cast<int>(d);
+    } catch (...) {
+        return fallback;
     }
-    return std::clamp(out, lo, hi);
 }
 
 bool ModMenuLink::connect(std::string_view modId, const MenuState &state, ToggleFn onToggle, ChangeFn onChange,

@@ -6,6 +6,8 @@
 #include <memory>
 #include <string>
 
+#include "voice/AudioDefaults.h"
+
 namespace voicechat {
 
 class SocketLoopback {
@@ -13,7 +15,7 @@ class SocketLoopback {
     using LogFn = std::function<void(const std::string &)>;
     explicit SocketLoopback(LogFn log);
     ~SocketLoopback();
-    bool start(float volume = 1.0f);
+    bool start(float volume = audio_defaults::selfHearingVolume);
     void stop();
 
   private:

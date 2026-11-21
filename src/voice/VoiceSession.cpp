@@ -2,6 +2,7 @@
 
 #include "voice/MicSocketSource.h"
 #include "voice/RingBuffer.h"
+#include "voice/WebRtcProcessor.h"
 
 #include <cstring> // Oboe 1.9's umbrella header uses memset
 #include <android/log.h>
@@ -12,6 +13,7 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <exception>
 #include <mutex>
 #include <thread>
 
@@ -43,7 +45,7 @@ struct VoiceSession::Impl : oboe::AudioStreamDataCallback {
     // The Oboe input callback only copies samples. Encoding, position reads and UDP
     // sends run on a worker, never on Android's real-time audio callback.
     SpscRing<std::int16_t> capture{16000};
-    std::atomic<bool> captureStop{false}, directRunning{false};
+    std::atomic<bool> captureStop{false}, directRunning{false}, captureOverrun{false};
     std::mutex captureMu;
     std::condition_variable captureCv;
     std::thread captureThread;
@@ -52,20 +54,70 @@ struct VoiceSession::Impl : oboe::AudioStreamDataCallback {
     SpscRing<std::int16_t> monitor{1600}; // at most 100 ms of self-hearing
     const bool selfHearing;
     const float selfVolume;
+    LogFn log;
 
-    explicit Impl(const VoiceSessionConfig &c)
+    // The audio callback only copies the exact stereo samples it hands to
+    // Oboe into fixed 10 ms blocks. A separate worker feeds the reverse stream
+    // to APM; no WebRTC processing or allocation runs on the audio callback.
+    struct RenderBlock { std::int16_t pcm[WebRtcProcessor::kBlock * 2]{}; };
+    SpscRing<RenderBlock> renderReference{32}; // at most 320 ms, bounded
+    RenderBlock renderPending{};              // output callback only
+    int renderPendingFrames = 0;              // output callback only
+    std::thread renderThread;
+    std::condition_variable renderCv;
+    std::mutex renderMu;
+    std::atomic<bool> renderStop{false};
+    std::atomic<bool> aecActive{false}, noiseActive{false}, processingHealthy{false}, renderOverrun{false};
+    std::unique_ptr<WebRtcProcessor> processor; // lives until both workers and callbacks have stopped
+
+    explicit Impl(const VoiceSessionConfig &c, LogFn logger)
         : remotes(c.mixer), selfHearing(c.selfHearing),
-          selfVolume(std::isfinite(c.selfHearingVolume) ? std::clamp(c.selfHearingVolume, 0.f, 2.f) : 1.f) {}
+          selfVolume(std::isfinite(c.selfHearingVolume) ? std::clamp(c.selfHearingVolume, 0.f, 2.f) : 0.f),
+          log(std::move(logger)) {}
+
+    void processingFailure(const char *reason) {
+        if (processingHealthy.exchange(false) && log)
+            log(std::string("WebRTC processing stopped: ") + reason + "; using unprocessed microphone until restart");
+    }
 
     void onMicFrame(const std::int16_t *samples, int count) {
         if (selfHearing) monitor.write(samples, static_cast<std::size_t>(count));
-        if (sender) sender->pushMic(samples, count);
+        if (!sender) return;
+        std::array<std::int16_t, WebRtcProcessor::kCaptureFrame> processed{};
+        if (processor && processingHealthy.load() && count == WebRtcProcessor::kCaptureFrame) {
+            if (processor->processCapture(samples, processed.data())) {
+                // A concurrent reference overrun makes this partial AEC result
+                // unreliable; bypass rather than pretending it is aligned.
+                if (processingHealthy.load()) samples = processed.data();
+            } else {
+                processingFailure("capture processing failed");
+            }
+        }
+        sender->pushMic(samples, count);
+    }
+
+    void renderLoop() {
+        RenderBlock block;
+        while (!renderStop.load()) {
+            if (renderOverrun.exchange(false) && log)
+                log("WebRTC render reference overran; using unprocessed microphone until restart");
+            while (renderReference.read(&block, 1) == 1) {
+                if (processingHealthy.load() && !processor->processRender(block.pcm))
+                    processingFailure("render reference processing failed");
+            }
+            // Do not notify from the real-time output callback. A short bounded
+            // wait keeps the reference close to the audio HAL without blocking it.
+            std::unique_lock<std::mutex> lock(renderMu);
+            renderCv.wait_for(lock, std::chrono::milliseconds(5), [this] { return renderStop.load(); });
+        }
     }
 
     void captureLoop() {
         std::array<std::int16_t, VoiceSender::kFrame> frame{};
         std::size_t fill = 0;
         while (!captureStop.load()) {
+            if (captureOverrun.exchange(false) && log)
+                log("WebRTC capture input overran; using unprocessed microphone until restart");
             fill += capture.read(frame.data() + fill, frame.size() - fill);
             if (fill == frame.size()) {
                 onMicFrame(frame.data(), static_cast<int>(fill));
@@ -81,7 +133,13 @@ struct VoiceSession::Impl : oboe::AudioStreamDataCallback {
     oboe::DataCallbackResult onAudioReady(oboe::AudioStream *stream, void *data, int32_t frames) override {
         if (frames <= 0) return oboe::DataCallbackResult::Continue;
         if (stream->getDirection() == oboe::Direction::Input) {
-            capture.write(static_cast<const std::int16_t *>(data), static_cast<std::size_t>(frames));
+            const auto count = static_cast<std::size_t>(frames);
+            if (capture.write(static_cast<const std::int16_t *>(data), count) != count &&
+                processingHealthy.exchange(false)) {
+                // Capture loss also breaks AEC timing. Report from the worker,
+                // not this callback, and bypass processing until restart.
+                captureOverrun.store(true);
+            }
             captureCv.notify_one();
             return oboe::DataCallbackResult::Continue;
         }
@@ -103,12 +161,32 @@ struct VoiceSession::Impl : oboe::AudioStreamDataCallback {
                 offset += chunk;
             }
         }
+        if (aecActive.load(std::memory_order_relaxed) && processingHealthy.load(std::memory_order_relaxed)) {
+            for (int offset = 0; offset < frames;) {
+                const int n = std::min(WebRtcProcessor::kBlock - renderPendingFrames, frames - offset);
+                std::memcpy(renderPending.pcm + 2 * renderPendingFrames, stereo + 2 * offset,
+                            static_cast<std::size_t>(n) * 2 * sizeof(std::int16_t));
+                renderPendingFrames += n;
+                offset += n;
+                if (renderPendingFrames == WebRtcProcessor::kBlock) {
+                    if (renderReference.write(&renderPending, 1) != 1) {
+                        // A dropped reference destroys timing. Stop processing
+                        // rather than silently canceling against stale audio.
+                        processingHealthy.store(false);
+                        renderOverrun.store(true);
+                        renderPendingFrames = 0;
+                        break;
+                    }
+                    renderPendingFrames = 0;
+                }
+            }
+        }
         return oboe::DataCallbackResult::Continue;
     }
 };
 
 VoiceSession::VoiceSession(VoiceSessionConfig cfg, PositionFn position, LogFn log)
-    : d_(new Impl(cfg)), cfg_(std::move(cfg)), position_(std::move(position)), log_(std::move(log)) {}
+    : d_(new Impl(cfg, log)), cfg_(std::move(cfg)), position_(std::move(position)), log_(std::move(log)) {}
 
 VoiceSession::~VoiceSession() { stop(); }
 
@@ -136,6 +214,58 @@ bool VoiceSession::start() {
         LOGE("opus encoder failed to initialise");
         stop();
         return false;
+    }
+
+    // The launcher already asks Android for AEC. Avoid adding a second AEC
+    // there, or on the direct communication preset. Monitoring is also
+    // excluded: this partial canceller must not be treated as feedback safety.
+    bool voiceAec = cfg_.webrtcVoiceAec;
+    if (voiceAec && cfg_.micSource != "direct") {
+        voiceAec = false;
+        if (log_) log_("WebRTC voice-only AEC skipped: launcher capture already requests Android AEC");
+    }
+    if (voiceAec && inputPreset(cfg_.micInputPreset) == oboe::InputPreset::VoiceCommunication) {
+        voiceAec = false;
+        if (log_) log_("WebRTC voice-only AEC skipped: the communication preset may already use platform AEC");
+    }
+    if (voiceAec && cfg_.selfHearing) {
+        voiceAec = false;
+        if (log_) log_("WebRTC voice-only AEC skipped while self-hearing is enabled; it is not feedback protection");
+    }
+    if (voiceAec || cfg_.webrtcNoiseSuppression) {
+        if (!WebRtcProcessor::compiledIn()) {
+            if (log_) log_("WebRTC processing is not included in this build; microphone remains unprocessed");
+        } else {
+            try {
+                d->processor = std::make_unique<WebRtcProcessor>(WebRtcProcessor::Options{
+                    voiceAec, cfg_.webrtcNoiseSuppression, cfg_.webrtcAecDelayMs});
+                if (!d->processor->ready()) {
+                    d->processor.reset();
+                    if (log_) log_("WebRTC processor could not start; microphone remains unprocessed");
+                } else {
+                    d->renderOverrun = false;
+                    d->processingHealthy = true;
+                    d->aecActive = voiceAec;
+                    d->noiseActive = cfg_.webrtcNoiseSuppression;
+                    if (voiceAec) {
+                        d->renderStop = false;
+                        d->renderThread = std::thread([d] { d->renderLoop(); });
+                        if (log_) log_("Experimental WebRTC AEC enabled for mod voice playback only; "
+                                       "Minecraft game audio is NOT in its reference and the delay is estimated");
+                    }
+                    if (d->noiseActive && log_) log_("WebRTC moderate noise suppression enabled for multiplayer mic");
+                }
+            } catch (const std::exception &e) {
+                d->processingHealthy = false;
+                d->aecActive = false;
+                d->noiseActive = false;
+                d->renderStop = true;
+                d->renderCv.notify_all();
+                if (d->renderThread.joinable()) d->renderThread.join();
+                d->processor.reset();
+                if (log_) log_(std::string("WebRTC setup failed; microphone remains unprocessed: ") + e.what());
+            }
+        }
     }
 
     oboe::AudioStreamBuilder b;
@@ -193,6 +323,7 @@ bool VoiceSession::startDirectMic() {
         return false;
     }
     d->capture.clear(); // no input callback or consumer is active yet
+    d->captureOverrun = false;
     d->captureStop = false;
     d->captureThread = std::thread([d] { d->captureLoop(); });
     r = d->in->requestStart();
@@ -218,6 +349,17 @@ void VoiceSession::stop() {
     if (d->captureThread.joinable()) d->captureThread.join();
     d->directRunning = false;
     if (d->out) { d->out->stop(); d->out->close(); d->out.reset(); }
+    d->renderStop = true;
+    d->renderCv.notify_all();
+    if (d->renderThread.joinable()) d->renderThread.join();
+    d->aecActive = false;
+    d->noiseActive = false;
+    d->processingHealthy = false;
+    d->renderOverrun = false;
+    d->captureOverrun = false;
+    d->renderReference.clear();
+    d->renderPendingFrames = 0;
+    d->processor.reset();
     d->capture.clear();
     d->monitor.clear();
     d->remotes.setListener(false, 0, 0, 0, 0, 0);
@@ -247,6 +389,14 @@ std::string VoiceSession::status() const {
         s += ", relay packets sent " + std::to_string(d->packetsSent.load());
         s += ", mic level " + std::to_string(d->sender->lastRms());
         s += d->sender->speaking() ? " (speaking)" : "";
+    }
+    if (cfg_.webrtcVoiceAec || cfg_.webrtcNoiseSuppression) {
+        if ((d->aecActive || d->noiseActive) && !d->processingHealthy) {
+            s += ", WebRTC processing bypassed after error";
+        } else {
+            s += d->aecActive ? ", WebRTC voice-only AEC on" : ", WebRTC voice-only AEC off";
+            s += d->noiseActive ? ", WebRTC NS on" : ", WebRTC NS off";
+        }
     }
     s += ", speakers heard now " + std::to_string(d->remotes.speakerCount());
     return s;

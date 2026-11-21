@@ -47,6 +47,7 @@ class VoiceMod {
     mutable std::mutex mConfigMu;
     ModConfig mConfig; // guarded by mConfigMu once the menu is connected
     std::optional<pl::config::ConfigFile<ModConfig>> mConfigFile;
+    bool mLoaded = false; // lifecycle thread; never enable after a failed load
     std::unique_ptr<Loopback> mLoopback;
     std::unique_ptr<SocketLoopback> mSocketLoop;
     ModMenuLink mMenu;

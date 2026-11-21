@@ -29,7 +29,7 @@ struct SocketLoopback::Impl : oboe::AudioStreamDataCallback {
     std::shared_ptr<oboe::AudioStream> out;
     OpusEncoder *enc = nullptr;
     OpusDecoder *dec = nullptr;
-    float volume = 1.f;
+    float volume = 0.f;
     SpscRing<int16_t> playback{kRate}; // ~1 s; producer = socket thread, consumer = audio callback
     std::unique_ptr<MicSocketSource> source;
 
@@ -80,7 +80,7 @@ SocketLoopback::SocketLoopback(LogFn log) : d_(new Impl(std::move(log))) {}
 SocketLoopback::~SocketLoopback() { stop(); }
 
 bool SocketLoopback::start(float volume) {
-    d_->volume = std::isfinite(volume) ? std::clamp(volume, 0.f, 2.f) : 1.f;
+    d_->volume = std::isfinite(volume) ? std::clamp(volume, 0.f, 2.f) : 0.f;
     int err = 0;
     d_->enc = opus_encoder_create(kRate, 1, OPUS_APPLICATION_VOIP, &err);
     d_->dec = opus_decoder_create(kRate, 1, &err);

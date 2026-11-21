@@ -122,5 +122,12 @@ int main() {
     CHECK(ModMenuLink::parseInt("150", 0, 0, 400) == 150 && ModMenuLink::parseInt("150.0", 0, 0, 400) == 150 &&
           ModMenuLink::parseInt("999", 0, 0, 400) == 400 && ModMenuLink::parseInt("-5", 7, 0, 400) == 0 &&
           ModMenuLink::parseInt("abc", 77, 0, 400) == 77 && ModMenuLink::parseInt("", 5, 0, 10) == 5, "parseInt");
+    CHECK(ModMenuLink::parseInt("nan", 77, 0, 400) == 77 &&
+          ModMenuLink::parseInt("-inf", 77, 0, 400) == 77 &&
+          ModMenuLink::parseInt("1e100", 77, 0, 400) == 400 &&
+          ModMenuLink::parseInt("-1e100", 77, 0, 400) == 0 &&
+          ModMenuLink::parseInt("123junk", 77, 0, 400) == 77 &&
+          ModMenuLink::parseInt("123.5junk", 77, 0, 400) == 77,
+          "parseInt rejects invalid values and clamps before narrowing");
     std::printf("modmenu tests ok\n");
 }

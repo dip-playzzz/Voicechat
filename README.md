@@ -57,13 +57,36 @@ Keep the other generated settings. `playerId: 0` chooses a random ID; if assigni
 - **`launcher`** (default): receive 16 kHz mono audio from a LeviLauncher build with its `VoiceCaptureService`. The mod listens on `@org.levimc.voicechatlevi.audio` and accepts only the same app UID. A launcher without this service will wait indefinitely for it.
 - **`direct`**: open the microphone with Oboe after LeviLauncher has microphone permission. This can be useful when the launcher does not provide the service. If the launcher is already using the mic, stop its capture service or use `launcher` instead.
 
+The `VoiceCaptureService` in [LeviLaunchroid-Voice1](https://github.com/qqchoke99-bot/LeviLaunchroid-Voice1/blob/c98f20cecbac216f305ce93d4ae8a4a29f4e586c/app/src/main/java/org/levimc/launcher/voice/VoiceCaptureService.kt) already uses Android's voice-communication input and attempts to attach `AcousticEchoCanceler`. This mod does not send its optional control greeting; that launcher times out after up to 1.5 seconds and falls back to requesting AEC with the noise suppressor off. Its `VoiceChatLevi` log reports whether the effect attached. AEC availability and effectiveness depend on the device; an attached effect does not guarantee that speaker/game audio is removed.
+
 Restart the mod/game after editing text fields. The Mod Menu card can also toggle the mod/relay and adjust mic gain, gate and radius. All players need to be in a supported world for positions to update; then speak near one another.
 
 ## Self-hearing and settings
 
-`selfHearing` defaults to `true`; set it to `false` to hear only other players. If enabled during multiplayer, the same mic stream is mixed locally rather than opening a second microphone. `selfHearingVolume` is a linear 0.0–2.0 gain. `throughResound` is a preference only: the game-mixer/Resound effects path is not implemented, so self-hearing uses direct playback. Old configs without `selfHearing` inherit their `loopbackTest` value once; after migration, `selfHearing` controls playback.
+**Self-hearing is off by default:** `selfHearing: false` prevents local microphone playback, but still permits sending your microphone to other players. Speaker audio can still be picked up by the microphone. To avoid an acoustic feedback loop, use headphones and start with the device volume low if you deliberately enable monitoring. Even a low monitoring gain cannot guarantee safe volume on every device. Stop playback immediately if you hear a squeal.
 
-For multiplayer, adjust `micGainPercent` (100 = unchanged) and `micGate` (0 = always send). Lower the gate if quiet speech is cut off. `micInputPreset` selects the direct Android input mode; `micGainDb` applies only to the standalone direct self-hearing test.
+If enabled during multiplayer, self-hearing uses the same mic stream rather than opening a second microphone. `selfHearingVolume` is a linear 0.0–2.0 gain with a new default of 0.1; standalone direct self-hearing now defaults to 0 dB mic gain instead of +6 dB. For safety, the first load of a pre-v4 config disables self-hearing, sets `loopbackTest` to false and resets these two monitoring gains; other settings, including relay configuration, are preserved. You may explicitly opt in again afterwards. `throughResound` is a preference only: the game-mixer/Resound effects path is not implemented, so self-hearing uses direct playback.
+
+For multiplayer, adjust `micGainPercent` (100 = unchanged) and `micGate` (0 = always send). A gate cannot reliably filter loud game sounds from speech. `micInputPreset` selects the **direct** Android input mode, not the launcher's capture service. `micGainDb` applies only to the standalone direct self-hearing test and is clamped to -60 to +12 dB. Android's `voice_communication` preset may enable echo cancellation on some devices, but may also suppress speech and cannot be relied on to eliminate feedback.
+
+## Experimental WebRTC audio processing
+
+The multiplayer microphone path can optionally use [WebRTC Audio Processing](https://github.com/thesofproject/webrtc-audio-processing) at the existing 16 kHz rate. Both options default to **off**, including when an existing config is upgraded. For example, to opt into moderate noise suppression, change these fields in the existing `config.json` while the game is closed (keep your other settings):
+
+```json
+{
+  "webrtcNoiseSuppression": true,
+  "webrtcVoiceAec": false
+}
+```
+
+- `webrtcNoiseSuppression` uses WebRTC's built-in suppressor on launcher or direct **multiplayer** microphone audio. It may also suppress speech; if speech is cut off, disable it or lower the separate `micGate`. It does not remove echo reliably. It is not used by the standalone self-hearing test.
+- `webrtcVoiceAec` is an **experimental, opt-in, voice-only** echo canceller for the direct microphone. Its reference is the stereo audio produced by this mod's separate Oboe voice stream. **Minecraft's game sound is not in that reference**, so this cannot cancel all game-sound echo. Device volume, routing and actual hardware latencies are not measured. `webrtcAecDelayMs` is a rough starting estimate (default 50, clamped to 0–500 ms), not a calibrated delay.
+- To avoid deliberately stacking echo cancellers, software AEC is skipped for `micSource: "launcher"` (the inspected launcher already requests Android AEC), the direct `voice_communication` preset, or enabled self-hearing. Some OEMs may still apply effects with other presets. The reference is copied on the output callback and processed on a worker; if the bounded reference or direct-capture queue overruns, WebRTC processing is bypassed until restart and the unprocessed mic is sent. Check the mod's status/log for the actual mode.
+
+**Neither option is feedback protection.** Keep self-hearing off unless deliberately needed; use headphones and stop if a squeal occurs. No Android hardware or full-game-audio AEC behavior has been validated yet.
+
+The suggested [noise-cancellation-cpp](https://github.com/jeffasante/noise-cancellation-cpp) is **not bundled**: its example depends on LibTorch and a model, assumes a 48 kHz offline pipeline and a large context window, and has not been validated as a low-latency Android streaming processor. Its current frame path also does not return the computed hybrid fusion output. WebRTC's built-in suppressor is the available alternative here, not an integration of that project.
 
 ## Troubleshooting
 
@@ -78,26 +101,28 @@ Check logcat for the `VoiceChat` tag and the mod logger:
 
 ## Build
 
-The GitHub Actions **Build** workflow produces the `voicechat-levipack` artifact. Import the `.levipack` in LeviLauncher's mod manager and enable it. Locally, Android SDK + NDK 28.2.13676358, CMake, Ninja and PowerShell are needed:
+The GitHub Actions **Build** workflow produces the `voicechat-levipack` artifact with separate `arm64-v8a` and `armeabi-v7a` packages. Import the one matching the device in LeviLauncher's mod manager and enable it. The modern NDK can require NEON even in the 32-bit build; non-NEON devices are not supported. Locally, Android SDK + NDK 28.2.13676358, CMake, Ninja, Python, Meson and PowerShell are needed:
 
 ```powershell
+python -m pip install meson==1.5.2
 ./scripts/package.ps1 -Abi arm64-v8a
 ```
 
-The workflow runs on a push to `main`, on a pull request, or manually from Actions. A failed compiler/package command now fails the workflow instead of silently continuing.
+The build downloads pinned WebRTC APM and Abseil sources and links them statically; their notices are included in the package. `-DVOICECHAT_ENABLE_WEBRTC=OFF` disables that dependency when configuring CMake (requested processing then stays off and is logged). The workflow runs on a push to `main`, on a pull request, or manually from Actions. A failed compiler/package command fails the workflow instead of silently continuing.
 
 ## Host tests
 
-On Linux, install `g++`, Python 3, CMake and Opus (e.g. `libopus-dev`). The following also compiles the real mod lifecycle against the real preloader headers and runs a simulated-device test of both microphone paths against the real relay:
+On Linux, install `g++`, Python 3, CMake, Ninja, Meson 1.5.2 and Opus (e.g. `libopus-dev`). The following also compiles the real mod lifecycle against the real preloader headers and runs a simulated-device test of both microphone paths against the real relay:
 
 ```sh
 cmake -S . -B build-host -DVOICECHAT_BUILD_HOST_INTEGRATION=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5
-cmake --build build-host --target voicechat_mod_compile_check voicechat_mod_integration_test -j 2
+cmake --build build-host --target voicechat_mod_compile_check voicechat_mod_integration_test voicechat_webrtc_test -j 2
+build-host/voicechat_webrtc_test
 PRELOADER_INC="$PWD/build-host/_deps/preloader_android-src/include" sh tests/run_host_tests.sh
 python3 tests/voice_mod_integration.py build-host/voicechat_mod_integration_test
 ```
 
-The tests include multiple simultaneous speakers, room/dimension/distance isolation, stale positions, relay reconnects, and the launcher/direct input paths. Android permission, Oboe hardware, actual Bedrock memory offsets and the Java bridge still require real-device/server testing.
+The WebRTC test uses synthetic signals with a known, matched echo reference; it is not proof of real-phone AEC or speech quality. Other tests include simultaneous speakers, room/dimension/distance isolation, stale positions, relay reconnects, and the launcher/direct input paths. Android permission, Oboe hardware, actual Bedrock memory offsets and the Java bridge still require real-device/server testing.
 
 ## Privacy
 

@@ -31,4 +31,4 @@ Proximity Voice Chat mod**, through the same relay.
 - **Not tested on a real server with real Simple Voice Chat clients.** Expect to fix small things on first run.
 - If Gradle can't resolve a dependency, edit `bridge/gradle.properties` (`paperVersion`, `svcApiVersion`).
 
-Tests: `sh bridge/test/run_java_tests.sh`.
+Tests: `sh bridge/test/run_java_tests.sh` (JDK 21 and Python required). ID/sequence checks use a test-only SVC type stub; the relay test uses the real Python relay. A full plugin compile is attempted only when SVC API sources and Paper stand-ins are provided, and neither test substitutes for a real server.

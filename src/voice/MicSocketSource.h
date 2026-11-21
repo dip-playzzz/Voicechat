@@ -8,8 +8,11 @@
 //  * Payload: raw PCM, signed 16-bit, mono, 16 000 Hz, native (little) endian, no header.
 //    The launcher writes 640-byte frames (320 samples = 20 ms), but we treat it as a
 //    byte stream and re-frame it ourselves.
-//  * The mod must NOT write anything back: the launcher reads up to 8 bytes after
-//    connecting and "stands down" if they start with "VCLS".
+//  * The mod sends no control greeting for compatibility with older launchers.
+//    Some newer VoiceCaptureService versions accept an optional VCLS greeting;
+//    without it they wait for a timeout and use their own capture/AEC defaults.
+//    Other launcher versions may interpret a greeting differently, so do not send
+//    one unconditionally.
 #include <atomic>
 #include <cstdint>
 #include <functional>

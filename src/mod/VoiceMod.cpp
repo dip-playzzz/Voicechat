@@ -23,6 +23,7 @@ VoiceMod &VoiceMod::instance() {
 VoiceMod::VoiceMod() : mSelf(*ll::mod::NativeMod::current()) {}
 
 bool VoiceMod::load() {
+    mLoaded = false;
     auto &self = getSelf();
     self.getLogger().debug("Loading...");
 
@@ -41,20 +42,56 @@ bool VoiceMod::load() {
         return false;
     }
 
-    // Older configs only had loopbackTest. Read it before ConfigFile merges in
-    // the new defaults, so upgrading does not unexpectedly turn self-hearing on.
-    std::optional<bool> legacySelfHearing;
-    try {
-        std::ifstream stream(self.getConfigDir() / "config.json");
-        if (stream) {
+    // Versions before 4 enabled microphone monitoring by default, including a
+    // +6 dB direct-mic boost. Reset those settings once on upgrade so an old
+    // config cannot unexpectedly produce feedback. Do this BEFORE ConfigFile
+    // rewrites its version: a crash or failed save must not mark the unsafe
+    // settings as already migrated. Other settings (including relay settings)
+    // are left unchanged. A v4 user can explicitly re-enable monitoring.
+    const auto configPath = self.getConfigDir() / "config.json";
+    const bool hasConfig = std::filesystem::exists(configPath, ec);
+    if (ec) {
+        self.getLogger().error("Cannot check voice config {}: {}", configPath.string(), ec.message());
+        return false;
+    }
+    if (hasConfig) {
+        try {
+            std::ifstream stream(configPath);
+            if (!stream) {
+                self.getLogger().error("Cannot read voice config {}; audio will not start", configPath.string());
+                return false;
+            }
             nlohmann::json old;
             stream >> old;
-            if (old.is_object() && !old.contains("selfHearing") && old.contains("loopbackTest") &&
-                old["loopbackTest"].is_boolean())
-                legacySelfHearing = old["loopbackTest"].get<bool>();
+            if (!old.is_object()) {
+                self.getLogger().error("Voice config is not an object; audio will not start");
+                return false;
+            }
+            const bool hasIntegerVersion = old.contains("version") && old["version"].is_number_integer();
+            if (hasIntegerVersion && old["version"] > kConfigVersion) {
+                self.getLogger().error("Voice config is from a newer version; audio will not start or overwrite it");
+                return false;
+            }
+            if (!hasIntegerVersion || old["version"] != kConfigVersion) {
+                old["selfHearing"] = false;
+                old["loopbackTest"] = false;
+                old["selfHearingVolume"] = audio_defaults::selfHearingVolume;
+                old["micGainDb"] = audio_defaults::selfHearingMicGainDb;
+                old["version"] = kConfigVersion;
+                if (!pl::config::writeConfig(configPath, old)) {
+                    self.getLogger().error("Cannot save the safety update to {}; audio will not start", configPath.string());
+                    return false;
+                }
+                self.getLogger().warn("Safety update: self-hearing is off, monitor volume reset to 10%, "
+                                      "and standalone mic gain reset to 0 dB. Use headphones and low "
+                                      "device volume if you deliberately enable monitoring.");
+            }
+        } catch (const std::exception &e) {
+            // Do not overwrite an unreadable config or accidentally use unsafe
+            // settings. The user can repair the file and start the mod again.
+            self.getLogger().error("Cannot parse voice config {}: {}; audio will not start", configPath.string(), e.what());
+            return false;
         }
-    } catch (const std::exception &) {
-        // ConfigFile handles malformed files and reports the error itself.
     }
 
     mConfigFile.emplace();
@@ -63,11 +100,7 @@ bool VoiceMod::load() {
         return false;
     }
     mConfig = mConfigFile->value();
-    if (legacySelfHearing.has_value()) {
-        mConfig.selfHearing = *legacySelfHearing;
-        mConfigFile->value() = mConfig;
-        if (!mConfigFile->save()) self.getLogger().warn("Could not save migrated self-hearing setting");
-    }
+    mLoaded = true;
 
     self.getLogger().info("Loaded {} from {}", self.getName(), self.getModDir().string());
     return true;
@@ -75,6 +108,10 @@ bool VoiceMod::load() {
 
 bool VoiceMod::enable() {
     auto &self = getSelf();
+    if (!mLoaded) {
+        self.getLogger().error("Cannot enable voice chat after a failed or missing config load");
+        return false;
+    }
     self.getLogger().debug("Enabling...");
 
     // The card in LeviLauncher's Mod Menu (toggle + a few sliders). Missing menu = just no card.
@@ -157,6 +194,9 @@ bool VoiceMod::startServices() {
             vc.micInputPreset = config.micInputPreset;
             vc.selfHearing = config.selfHearing;
             vc.selfHearingVolume = config.selfHearingVolume;
+            vc.webrtcVoiceAec = config.webrtcVoiceAec;
+            vc.webrtcNoiseSuppression = config.webrtcNoiseSuppression;
+            vc.webrtcAecDelayMs = config.webrtcAecDelayMs;
             mSession = std::make_unique<VoiceSession>(
                 vc, [this] { return mTracker ? mTracker->snapshot() : PlayerSnapshot{}; },
                 [this](const std::string &msg) { getSelf().getLogger().info("{}", msg); });
@@ -264,8 +304,8 @@ void VoiceMod::audioStartupLoop(ModConfig config, VoiceSession *session) {
                     auto loop = std::make_unique<Loopback>();
                     if (loop->start(opt)) {
                         mLoopback = std::move(loop);
-                        log.info("Self Hearing running (direct loopback, preset={}, micGain={:.1f}dB). Use headphones.",
-                                 config.micInputPreset, config.micGainDb);
+                        log.info("Self Hearing running (direct loopback, preset={}). "
+                                 "Use headphones and start with low device volume.", config.micInputPreset);
                     } else {
                         log.error("Microphone is allowed but the audio stream failed to open (see 'VoiceChat' log lines)");
                     }
@@ -442,6 +482,7 @@ bool VoiceMod::unload() {
     getSelf().getLogger().debug("Unloading...");
     std::lock_guard<std::mutex> lock(mConfigMu);
     mConfigFile.reset();
+    mLoaded = false;
     return true;
 }
 
